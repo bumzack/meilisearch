@@ -35,7 +35,6 @@ impl<'t> Criterion for Words<'t> {
         if let Some(candidates) = self.candidates.as_mut() {
             *candidates -= params.excluded_candidates;
         }
-
         loop {
             debug!("Words at iteration {} ({:?})", self.query_trees.len(), self.candidates);
 

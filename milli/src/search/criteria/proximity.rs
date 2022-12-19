@@ -77,6 +77,15 @@ impl<'t> Criterion for Proximity<'t> {
                 {
                     self.state = None; // reset state
                 }
+                Some((_, query_tree, allowed_candidates)) if allowed_candidates.len() == 1 => {
+                    let new_candidates = std::mem::take(allowed_candidates);
+                    return Ok(Some(CriterionResult {
+                        query_tree: Some(query_tree.clone()),
+                        candidates: Some(new_candidates),
+                        filtered_candidates: None,
+                        initial_candidates: Some(self.initial_candidates.take()),
+                    }));
+                }
                 Some((_, query_tree, allowed_candidates)) => {
                     let mut new_candidates = if matches!(
                         self.implementation_strategy,
@@ -155,6 +164,10 @@ impl<'t> Criterion for Proximity<'t> {
                                 self.initial_candidates |= initial_candidates
                             }
                             None => self.initial_candidates.map_inplace(|c| c | &candidates),
+                        }
+
+                        if candidates.is_empty() {
+                            continue;
                         }
 
                         let maximum_proximity = maximum_proximity(&query_tree);

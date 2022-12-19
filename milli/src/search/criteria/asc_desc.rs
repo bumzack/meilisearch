@@ -148,6 +148,11 @@ impl<'t> Criterion for AscDesc<'t> {
                         }
 
                         self.allowed_candidates = &candidates - params.excluded_candidates;
+
+                        if self.allowed_candidates.len() <= 1 {
+                            continue;
+                        }
+
                         self.candidates = match self.field_id {
                             Some(field_id) => facet_ordered(
                                 self.index,
