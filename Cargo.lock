@@ -1119,9 +1119,9 @@ dependencies = [
 
 [[package]]
 name = "deserr"
-version = "0.1.4"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86290491a2b5c21a1a5083da8dae831006761258fabd5617309c3eebc5f89468"
+checksum = "28380303ca15ec07e1d5b079baf19cf849b09edad5cab219c1c51b2bd07523de"
 dependencies = [
  "deserr-internal",
  "serde-cs",
@@ -1130,9 +1130,9 @@ dependencies = [
 
 [[package]]
 name = "deserr-internal"
-version = "0.1.4"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7131de1c27581bc376a22166c9f570be91b76cb096be2f6aecf224c27bf7c49a"
+checksum = "860928cd8af78d223a3d70dd581f21d7c3de8aa2eecd938e0c0a399ded7c1451"
 dependencies = [
  "convert_case 0.5.0",
  "proc-macro2 1.0.49",
