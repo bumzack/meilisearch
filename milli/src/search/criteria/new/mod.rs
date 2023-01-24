@@ -167,39 +167,6 @@ fn resolve_query_tree_or_placeholder(
     }
 }
 
-#[allow(unused)]
-fn initial<'t>(
-    ctx: &'t dyn Context<'t>,
-    query_tree: QueryTreeOrPlaceholder,
-    universe: &UniverseCandidates,
-    // mut distinct: Option<D>,
-    wdcache: &mut WordDerivationsCache,
-) -> Result<UniverseCandidates> {
-    // resolve the whole query tree to retrieve an exhaustive list of documents matching the query.
-    // then remove the potential soft deleted documents.
-
-    let mut candidates =
-        resolve_query_tree_or_placeholder(ctx, &query_tree, wdcache)?.into_universe_candidates();
-    candidates.restrict(universe);
-
-    // Distinct should be lazy if placeholder?
-    //
-    // // because the initial_candidates should be an exhaustive count of the matching documents,
-    // // we precompute the distinct attributes.
-    // let initial_candidates = match &mut distinct {
-    //     Some(distinct) => {
-    //         let mut initial_candidates = RoaringBitmap::new();
-    //         for c in distinct.distinct(candidates.clone(), RoaringBitmap::new()) {
-    //             initial_candidates.insert(c?);
-    //         }
-    //         initial_candidates
-    //     }
-    //     None => candidates.clone(),
-    // };
-
-    Ok(candidates)
-}
-
 enum WordsIter {
     Branches {
         branches: std::vec::IntoIter<Operation>,
@@ -296,6 +263,8 @@ impl<'t> Sort<'t> {
     ) -> Result<Self> {
         let fields_ids_map = index.fields_ids_map(rtxn)?;
         let field_id = fields_ids_map.id(&field_name);
+
+        // TODO: What is this, why?
         #[allow(unused)]
         let faceted_candidates = match field_id {
             Some(field_id) => {
@@ -367,6 +336,39 @@ impl<'t> Criterion2 for Sort<'t> {
     }
 }
 
+#[allow(unused)]
+fn initial<'t>(
+    ctx: &'t dyn Context<'t>,
+    query_tree: QueryTreeOrPlaceholder,
+    universe: &UniverseCandidates,
+    // mut distinct: Option<D>,
+    wdcache: &mut WordDerivationsCache,
+) -> Result<UniverseCandidates> {
+    // resolve the whole query tree to retrieve an exhaustive list of documents matching the query.
+    // then remove the potential soft deleted documents.
+
+    let mut candidates =
+        resolve_query_tree_or_placeholder(ctx, &query_tree, wdcache)?.into_universe_candidates();
+    candidates.restrict(universe);
+
+    // Distinct should be lazy if placeholder?
+    //
+    // // because the initial_candidates should be an exhaustive count of the matching documents,
+    // // we precompute the distinct attributes.
+    // let initial_candidates = match &mut distinct {
+    //     Some(distinct) => {
+    //         let mut initial_candidates = RoaringBitmap::new();
+    //         for c in distinct.distinct(candidates.clone(), RoaringBitmap::new()) {
+    //             initial_candidates.insert(c?);
+    //         }
+    //         initial_candidates
+    //     }
+    //     None => candidates.clone(),
+    // };
+
+    Ok(candidates)
+}
+
 #[allow(clippy::if_same_then_else, unused)]
 pub fn execute_search<'t>(
     index: &'t Index,
@@ -410,24 +412,30 @@ pub fn execute_search<'t>(
             back!();
             continue;
         };
-        if next_bucket.candidates.len() == 1 {
-            results.extend(next_bucket.candidates);
-            continue;
-        } else if next_bucket.candidates.is_empty() {
-            back!();
-            continue;
-        } else {
-            // make next criterion iter or add to results
-            cur_criterion_index += 1;
-            if cur_criterion_index == criteria_len {
+        match next_bucket.candidates.len() {
+            0 => {
+                // no progress anymore, go to the parent candidate
+                back!();
+                continue;
+            }
+            1 => {
+                // only one candidate, no need to sort through the child ranking rule
                 results.extend(next_bucket.candidates);
-            } else {
-                // make new iterator from next criterion
-                criteria[cur_criterion_index].start(
-                    &next_bucket.candidates,
-                    &next_bucket.query_tree,
-                    &mut wdcache,
-                );
+                continue;
+            }
+            _ => {
+                // many candidates, give to next ranking rule, if any
+                if cur_criterion_index == criteria_len - 1 {
+                    results.extend(next_bucket.candidates);
+                } else {
+                    cur_criterion_index += 1;
+                    // make new iterator from next criterion
+                    criteria[cur_criterion_index].start(
+                        &next_bucket.candidates,
+                        &next_bucket.query_tree,
+                        &mut wdcache,
+                    );
+                }
             }
         }
     }
