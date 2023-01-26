@@ -26,7 +26,6 @@ mod exactness;
 pub mod r#final;
 mod geo;
 mod initial;
-mod new;
 mod proximity;
 mod typo;
 mod words;
