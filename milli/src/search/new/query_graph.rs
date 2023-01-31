@@ -88,6 +88,7 @@ impl QueryGraph {
                     LocatedQueryTerm::ngram2(&query[length - 2], &query[length - 1])
                 {
                     if word_set.contains(ngram2_str.as_bytes()) {
+                        println!("word set contains {ngram2_str}? yes");
                         let ngram2 = LocatedQueryTerm {
                             value: QueryTerm::Word {
                                 original: ngram2_str,
@@ -97,6 +98,8 @@ impl QueryGraph {
                         };
                         let ngram2_idx = graph.add_node(&prev1, QueryNode::Term(ngram2));
                         new_nodes.push(ngram2_idx);
+                    } else {
+                        println!("word set contains {ngram2_str}? no");
                     }
                 }
             }
@@ -195,7 +198,19 @@ impl Debug for QueryNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             QueryNode::Term(LocatedQueryTerm { value, positions: _ }) => match value {
-                QueryTerm::Word { original: w, .. } => write!(f, "\"{w}\""),
+                QueryTerm::Word { original: w, derivations } => {
+                    write!(f, "\"{w} ")?;
+                    match derivations {
+                        WordDerivations::FromList(derived_words) => {
+                            write!(f, "({}D)", derived_words.len())?;
+                        }
+                        WordDerivations::FromPrefixDB => {
+                            write!(f, "(P)")?;
+                        }
+                    }
+                    write!(f, "\"")?;
+                    Ok(())
+                }
                 QueryTerm::Phrase(ws) => {
                     let joined =
                         ws.iter().filter_map(|x| x.clone()).collect::<Vec<String>>().join(" ");
@@ -226,7 +241,7 @@ TODO:
 #[cfg(test)]
 mod tests {
     use super::{LocatedQueryTerm, QueryGraph, QueryNode};
-    use crate::{index::tests::TempIndex, search::new::query_term::word_derivations};
+    use crate::{index::tests::TempIndex, search::new::query_term::word_derivations_max_typo_1};
     use charabia::Tokenize;
 
     impl QueryGraph {
@@ -266,7 +281,7 @@ mod tests {
 
         let mut graph = QueryGraph::from_query(
             LocatedQueryTerm::from_query("0 1 2 3 4 5 6 7".tokenize(), None, |word, is_prefix| {
-                word_derivations(&index, word, is_prefix, &fst)
+                word_derivations_max_typo_1(&index, word, is_prefix, &fst)
             })
             .unwrap(),
             fst,

@@ -36,6 +36,7 @@ mod distinct;
 pub mod facet;
 mod fst_utils;
 mod matches;
+pub mod new;
 mod query_tree;
 
 pub struct Search<'a> {

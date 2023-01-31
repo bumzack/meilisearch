@@ -1,7 +1,15 @@
 // TODO: put primitive query part in here
 
-use crate::{Index, Result};
+use crate::{
+    search::{
+        build_dfa,
+        fst_utils::{Intersection, StartsWith},
+        get_first,
+    },
+    Index, Result,
+};
 use charabia::{normalizer::NormalizedTokenIter, SeparatorKind, TokenKind};
+use fst::{automaton::Str, IntoStreamer, Streamer};
 use std::{mem, ops::RangeInclusive};
 
 #[derive(Debug, Clone)]
@@ -12,13 +20,27 @@ pub enum WordDerivations {
     FromPrefixDB,
 }
 
-pub fn word_derivations(
+// TODO: max_typo parameter
+// TODO: fetch from prefix DB if possible
+pub fn word_derivations_max_typo_1(
     index: &Index,
     word: &str,
     is_prefix: bool,
     fst: &fst::Set<Vec<u8>>,
 ) -> Result<WordDerivations> {
-    todo!()
+    let mut derived_words = Vec::new();
+
+    let dfa = build_dfa(word, 1, is_prefix);
+    let starts = StartsWith(Str::new(get_first(word)));
+    let mut stream = fst.search_with_state(Intersection(starts, &dfa)).into_stream();
+
+    while let Some((word, state)) = stream.next() {
+        let word = std::str::from_utf8(word)?;
+        // let d = dfa.distance(state.1);
+        derived_words.push(word.to_string());
+    }
+
+    Ok(WordDerivations::FromList(derived_words))
 }
 
 #[derive(Debug, Clone)]
@@ -54,7 +76,6 @@ impl LocatedQueryTerm {
 
         let mut peekable = query.peekable();
         while let Some(token) = peekable.next() {
-            position += 1;
             // early return if word limit is exceeded
             if primitive_query.len() >= parts_limit {
                 return Ok(primitive_query);
@@ -62,6 +83,7 @@ impl LocatedQueryTerm {
 
             match token.kind {
                 TokenKind::Word | TokenKind::StopWord => {
+                    position += 1;
                     // 1. if the word is quoted we push it in a phrase-buffer waiting for the ending quote,
                     // 2. if the word is not the last token of the query and is not a stop_word we push it as a non-prefix word,
                     // 3. if the word is the last token of the query we push it as a prefix word.
@@ -101,6 +123,14 @@ impl LocatedQueryTerm {
                     }
                 }
                 TokenKind::Separator(separator_kind) => {
+                    match separator_kind {
+                        SeparatorKind::Hard => {
+                            position += 1;
+                        }
+                        SeparatorKind::Soft => {
+                            position += 0;
+                        }
+                    }
                     let quote_count = token.lemma().chars().filter(|&s| s == '"').count();
                     // swap quoted state if we encounter a double quote
                     if quote_count % 2 != 0 {
@@ -140,6 +170,11 @@ impl LocatedQueryTerm {
         y: &LocatedQueryTerm,
     ) -> Option<(String, RangeInclusive<i8>)> {
         if *x.positions.end() != y.positions.start() - 1 {
+            println!(
+                "x positions end: {}, y positions start: {}",
+                *x.positions.end(),
+                y.positions.start()
+            );
             return None;
         }
         match (&x.value, &y.value) {

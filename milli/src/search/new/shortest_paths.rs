@@ -176,7 +176,7 @@ mod tests {
         index::tests::TempIndex,
         search::new::{
             proximity_graph::ProximityGraph,
-            query_term::{word_derivations, LocatedQueryTerm},
+            query_term::{word_derivations_max_typo_1, LocatedQueryTerm},
             QueryGraph,
         },
     };
@@ -189,7 +189,7 @@ mod tests {
         let parts = LocatedQueryTerm::from_query(
             "0 1 \"2 3\" 4 5".tokenize(),
             Some(10),
-            |word, is_prefix| word_derivations(&index, word, is_prefix, &fst),
+            |word, is_prefix| word_derivations_max_typo_1(&index, word, is_prefix, &fst),
         )
         .unwrap();
         // println!("{parts:?}");
