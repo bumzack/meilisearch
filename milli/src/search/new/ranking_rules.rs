@@ -2,7 +2,7 @@
 // use crate::search::new::words::Words;
 use crate::search::query_tree::Operation;
 use crate::search::WordDerivationsCache;
-use crate::{Index, Result};
+use crate::Result;
 use roaring::RoaringBitmap;
 
 pub trait RankingRuleOutputIter {

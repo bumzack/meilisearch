@@ -1,4 +1,6 @@
 use super::query_term::{LocatedQueryTerm, QueryTerm, WordDerivations};
+use crate::{Index, Result};
+use heed::RoTxn;
 use std::{collections::HashSet, fmt::Debug};
 
 #[derive(Clone)]
@@ -24,7 +26,7 @@ pub struct QueryGraph {
 }
 
 fn _assert_sizes() {
-    let _: [u8; 56] = [0; std::mem::size_of::<QueryNode>()];
+    let _: [u8; 112] = [0; std::mem::size_of::<QueryNode>()];
     let _: [u8; 96] = [0; std::mem::size_of::<Edges>()];
 }
 
@@ -65,7 +67,18 @@ impl QueryGraph {
 impl QueryGraph {
     // TODO: return the list of all matching words here as well
 
-    pub fn from_query(query: Vec<LocatedQueryTerm>, word_set: fst::Set<Vec<u8>>) -> QueryGraph {
+    pub fn from_query(
+        index: &Index,
+        txn: &RoTxn,
+        query: Vec<LocatedQueryTerm>,
+    ) -> Result<QueryGraph> {
+        // TODO: maybe empty nodes should not be removed here, to compute
+        // the score of the `words` ranking rule correctly
+        // it is very easy to traverse the graph and remove afterwards anyway
+        // Still, I'm keeping this here as a demo
+        let mut empty_nodes = vec![];
+
+        let word_set = index.words_fst(txn)?;
         let mut graph = QueryGraph::default();
 
         let (mut prev2, mut prev1, mut prev0): (Vec<usize>, Vec<usize>, Vec<usize>) =
@@ -80,26 +93,32 @@ impl QueryGraph {
             let term0 = query.last().unwrap();
 
             let mut new_nodes = vec![];
-            let ngram1_idx = graph.add_node(&prev0, QueryNode::Term(term0.clone()));
-            new_nodes.push(ngram1_idx);
+            let new_node_idx = graph.add_node(&prev0, QueryNode::Term(term0.clone()));
+            new_nodes.push(new_node_idx);
+            if term0.is_empty() {
+                empty_nodes.push(new_node_idx);
+            }
 
             if !prev1.is_empty() {
                 if let Some((ngram2_str, ngram2_pos)) =
                     LocatedQueryTerm::ngram2(&query[length - 2], &query[length - 1])
                 {
                     if word_set.contains(ngram2_str.as_bytes()) {
-                        println!("word set contains {ngram2_str}? yes");
                         let ngram2 = LocatedQueryTerm {
                             value: QueryTerm::Word {
-                                original: ngram2_str,
-                                derivations: WordDerivations::FromList(vec![]),
+                                derivations: WordDerivations {
+                                    original: ngram2_str.clone(),
+                                    // TODO: could add a typo if it's an ngram?
+                                    zero_typo: Some(ngram2_str),
+                                    one_typo: vec![],
+                                    two_typos: vec![],
+                                    use_prefix_db: false,
+                                },
                             },
                             positions: ngram2_pos,
                         };
                         let ngram2_idx = graph.add_node(&prev1, QueryNode::Term(ngram2));
                         new_nodes.push(ngram2_idx);
-                    } else {
-                        println!("word set contains {ngram2_str}? no");
                     }
                 }
             }
@@ -112,8 +131,14 @@ impl QueryGraph {
                     if word_set.contains(ngram3_str.as_bytes()) {
                         let ngram3 = LocatedQueryTerm {
                             value: QueryTerm::Word {
-                                original: ngram3_str,
-                                derivations: WordDerivations::FromList(vec![]),
+                                derivations: WordDerivations {
+                                    original: ngram3_str.clone(),
+                                    // TODO: could add a typo if it's an ngram?
+                                    zero_typo: Some(ngram3_str),
+                                    one_typo: vec![],
+                                    two_typos: vec![],
+                                    use_prefix_db: false,
+                                },
                             },
                             positions: ngram3_pos,
                         };
@@ -126,7 +151,9 @@ impl QueryGraph {
         }
         graph.connect_to_node(&prev0, graph.end_node);
 
-        graph
+        graph.remove_nodes_keep_edges(&empty_nodes);
+
+        Ok(graph)
     }
     pub fn remove_nodes(&mut self, nodes: &[usize]) {
         for &node in nodes {
@@ -197,19 +224,16 @@ impl QueryGraph {
 impl Debug for QueryNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            QueryNode::Term(LocatedQueryTerm { value, positions: _ }) => match value {
-                QueryTerm::Word { original: w, derivations } => {
-                    write!(f, "\"{w} ")?;
-                    match derivations {
-                        WordDerivations::FromList(derived_words) => {
-                            write!(f, "({}D)", derived_words.len())?;
-                        }
-                        WordDerivations::FromPrefixDB => {
-                            write!(f, "(P)")?;
-                        }
+            QueryNode::Term(term @ LocatedQueryTerm { value, positions: _ }) => match value {
+                QueryTerm::Word {
+                    derivations:
+                        WordDerivations { original, zero_typo, one_typo, two_typos, use_prefix_db },
+                } => {
+                    if term.is_empty() {
+                        write!(f, "{original} (∅)")
+                    } else {
+                        write!(f, "{zero_typo:?} {one_typo:?} {two_typos:?} {use_prefix_db}")
                     }
-                    write!(f, "\"")?;
-                    Ok(())
                 }
                 QueryTerm::Phrase(ws) => {
                     let joined =
@@ -276,23 +300,36 @@ mod tests {
 
     #[test]
     fn build_graph() {
-        let index = TempIndex::new();
-        let fst = fst::Set::from_iter(["01", "23", "234", "56"]).unwrap();
-
-        let mut graph = QueryGraph::from_query(
-            LocatedQueryTerm::from_query("0 1 2 3 4 5 6 7".tokenize(), None, |word, is_prefix| {
-                word_derivations_max_typo_1(&index, word, is_prefix, &fst)
+        let mut index = TempIndex::new();
+        index.index_documents_config.autogenerate_docids = true;
+        index
+            .update_settings(|s| {
+                s.set_searchable_fields(vec!["text".to_owned()]);
             })
-            .unwrap(),
-            fst,
-        );
-        // println!("{}", graph.graphviz());
+            .unwrap();
+        index
+            .add_documents(documents!({
+                "text": "0 1 2 3 4 5 6 7 01 23 234 56",
+            }))
+            .unwrap();
 
-        let positions_to_remove = vec![3, 6, 0, 4];
-        for p in positions_to_remove {
-            graph.remove_words_at_position(p);
-            println!("{}", graph.graphviz());
-        }
+        // let fst = fst::Set::from_iter(["01", "23", "234", "56"]).unwrap();
+        let txn = index.read_txn().unwrap();
+        let fst = index.words_fst(&txn).unwrap();
+        let query = LocatedQueryTerm::from_query(
+            "0 no 1 2 3 4 5 6 7".tokenize(),
+            None,
+            |word, is_prefix| word_derivations_max_typo_1(&index, &txn, word, is_prefix, &fst),
+        )
+        .unwrap();
+        let mut graph = QueryGraph::from_query(&index, &txn, query).unwrap();
+        println!("{}", graph.graphviz());
+
+        // let positions_to_remove = vec![3, 6, 0, 4];
+        // for p in positions_to_remove {
+        //     graph.remove_words_at_position(p);
+        //     println!("{}", graph.graphviz());
+        // }
 
         // let proximities = |w1: &str, w2: &str| -> Vec<i8> {
         //     if matches!((w1, w2), ("56", "7")) {

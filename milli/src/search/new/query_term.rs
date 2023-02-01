@@ -10,43 +10,82 @@ use crate::{
 };
 use charabia::{normalizer::NormalizedTokenIter, SeparatorKind, TokenKind};
 use fst::{automaton::Str, IntoStreamer, Streamer};
-use std::{mem, ops::RangeInclusive};
+use heed::{types::DecodeIgnore, RoTxn};
+use std::{borrow::Cow, mem, ops::RangeInclusive};
 
 #[derive(Debug, Clone)]
-pub enum WordDerivations {
-    // TODO: The list should be split by number of typos
-    // TODO: Should distinguish between typos and prefixes as well
-    FromList(Vec<String>),
-    FromPrefixDB,
+pub struct WordDerivations {
+    pub original: String,
+    pub zero_typo: Option<String>,
+    pub one_typo: Vec<String>,
+    pub two_typos: Vec<String>,
+    pub use_prefix_db: bool,
+}
+impl WordDerivations {
+    pub fn zero_typo_word(&self) -> Option<&str> {
+        self.zero_typo.as_deref()
+    }
 }
 
 // TODO: max_typo parameter
 // TODO: fetch from prefix DB if possible
 pub fn word_derivations_max_typo_1(
     index: &Index,
+    txn: &RoTxn,
     word: &str,
     is_prefix: bool,
-    fst: &fst::Set<Vec<u8>>,
+    fst: &fst::Set<Cow<[u8]>>,
 ) -> Result<WordDerivations> {
-    let mut derived_words = Vec::new();
+    let mut use_prefix_db = false;
 
-    let dfa = build_dfa(word, 1, is_prefix);
+    if is_prefix
+        && index.word_prefix_docids.remap_data_type::<DecodeIgnore>().get(txn, word)?.is_some()
+    {
+        use_prefix_db = true;
+    }
+
+    let mut zero_typo = Option::None;
+    let mut one_typo = Vec::new();
+    let mut two_typos = Vec::new();
+
+    let dfa = build_dfa(word, 1, is_prefix && !use_prefix_db);
     let starts = StartsWith(Str::new(get_first(word)));
     let mut stream = fst.search_with_state(Intersection(starts, &dfa)).into_stream();
 
     while let Some((word, state)) = stream.next() {
         let word = std::str::from_utf8(word)?;
-        // let d = dfa.distance(state.1);
-        derived_words.push(word.to_string());
+        let d = dfa.distance(state.1);
+        match d.to_u8() {
+            0 => {
+                zero_typo = Some(word.to_owned());
+            }
+            1 => {
+                one_typo.push(word.to_string());
+            }
+            2 => {
+                two_typos.push(word.to_string());
+            }
+            _ => {
+                todo!()
+            }
+        }
     }
 
-    Ok(WordDerivations::FromList(derived_words))
+    Ok(WordDerivations { original: word.to_owned(), zero_typo, one_typo, two_typos, use_prefix_db })
 }
 
 #[derive(Debug, Clone)]
 pub enum QueryTerm {
     Phrase(Vec<Option<String>>),
-    Word { original: String, derivations: WordDerivations },
+    Word { derivations: WordDerivations },
+}
+impl QueryTerm {
+    pub fn original_single_word(&self) -> Option<&str> {
+        match self {
+            QueryTerm::Phrase(_) => None,
+            QueryTerm::Word { derivations } => derivations.zero_typo_word(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +95,17 @@ pub struct LocatedQueryTerm {
 }
 
 impl LocatedQueryTerm {
+    pub fn is_empty(&self) -> bool {
+        match &self.value {
+            QueryTerm::Phrase(_) => false,
+            QueryTerm::Word { derivations, .. } => {
+                derivations.zero_typo.is_none()
+                    && derivations.one_typo.is_empty()
+                    && derivations.two_typos.is_empty()
+                    && !derivations.use_prefix_db
+            }
+        }
+    }
     /// Create primitive query from tokenized query string,
     /// the primitive query is an intermediate state to build the query tree.
     pub fn from_query(
@@ -95,6 +145,8 @@ impl LocatedQueryTerm {
                         if let TokenKind::StopWord = token.kind {
                             phrase.push(None);
                         } else {
+                            // TODO: in a phrase, check that every word exists
+                            // otherwise return WordDerivations::Empty
                             phrase.push(Some(token.lemma().to_string()));
                         }
                     } else if peekable.peek().is_some() {
@@ -102,10 +154,7 @@ impl LocatedQueryTerm {
                         } else {
                             let derivations = derivations(token.lemma(), false)?;
                             let located_term = LocatedQueryTerm {
-                                value: QueryTerm::Word {
-                                    original: token.lemma().to_owned(),
-                                    derivations,
-                                },
+                                value: QueryTerm::Word { derivations },
                                 positions: position..=position,
                             };
                             primitive_query.push(located_term);
@@ -113,10 +162,7 @@ impl LocatedQueryTerm {
                     } else {
                         let derivations = derivations(token.lemma(), true)?;
                         let located_term = LocatedQueryTerm {
-                            value: QueryTerm::Word {
-                                original: token.lemma().to_owned(),
-                                derivations,
-                            },
+                            value: QueryTerm::Word { derivations },
                             positions: position..=position,
                         };
                         primitive_query.push(located_term);
@@ -177,8 +223,8 @@ impl LocatedQueryTerm {
             );
             return None;
         }
-        match (&x.value, &y.value) {
-            (QueryTerm::Word { original: w1, .. }, QueryTerm::Word { original: w2, .. }) => {
+        match (&x.value.original_single_word(), &y.value.original_single_word()) {
+            (Some(w1), Some(w2)) => {
                 let term = (format!("{w1}{w2}"), *x.positions.start()..=*y.positions.end());
                 Some(term)
             }
@@ -195,12 +241,12 @@ impl LocatedQueryTerm {
         {
             return None;
         }
-        match (&x.value, &y.value, &z.value) {
-            (
-                QueryTerm::Word { original: w1, .. },
-                QueryTerm::Word { original: w2, .. },
-                QueryTerm::Word { original: w3, .. },
-            ) => {
+        match (
+            &x.value.original_single_word(),
+            &y.value.original_single_word(),
+            &z.value.original_single_word(),
+        ) {
+            (Some(w1), Some(w2), Some(w3)) => {
                 let term = (format!("{w1}{w2}{w3}"), *x.positions.start()..=*z.positions.end());
                 Some(term)
             }
