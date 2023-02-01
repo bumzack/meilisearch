@@ -224,44 +224,24 @@ impl ProximityGraph {
             for &successor_idx in prox_graph.query.edges[node_idx].outgoing.iter() {
                 match &prox_graph.query.nodes[successor_idx] {
                     QueryNode::Term(LocatedQueryTerm { value: value2, positions: pos2 }) => {
-                        let (derivations2, pos2) = match node {
-                            QueryNode::Term(LocatedQueryTerm {
-                                value: value2,
-                                positions: pos2,
-                            }) => {
-                                match value2 {
-                                    QueryTerm::Word { derivations } => {
-                                        (derivations.clone(), *pos2.end())
-                                    }
-                                    QueryTerm::Phrase(phrase2) => {
-                                        // TODO: remove second unwrap
-                                        let original =
-                                            phrase2.last().unwrap().as_ref().unwrap().clone();
-                                        (
-                                            WordDerivations {
-                                                original: original.clone(),
-                                                zero_typo: vec![original],
-                                                one_typo: vec![],
-                                                two_typos: vec![],
-                                                use_prefix_db: false,
-                                            },
-                                            *pos2.end(),
-                                        )
-                                    }
-                                }
+                        let (derivations2, pos2) = match value2 {
+                            QueryTerm::Word { derivations } => (derivations.clone(), *pos2.start()),
+                            QueryTerm::Phrase(phrase2) => {
+                                // TODO: remove second unwrap
+                                let original = phrase2.last().unwrap().as_ref().unwrap().clone();
+                                (
+                                    WordDerivations {
+                                        original: original.clone(),
+                                        zero_typo: vec![original],
+                                        one_typo: vec![],
+                                        two_typos: vec![],
+                                        use_prefix_db: false,
+                                    },
+                                    *pos2.start(),
+                                )
                             }
-                            QueryNode::Start => (
-                                WordDerivations {
-                                    original: String::new(),
-                                    zero_typo: vec![],
-                                    one_typo: vec![],
-                                    two_typos: vec![],
-                                    use_prefix_db: false,
-                                },
-                                -100,
-                            ),
-                            _ => continue,
                         };
+
                         // TODO: here we would actually do it for each combination of word1 and word2
                         // and take the union of them
                         let proxs = if pos1 + 1 != pos2 {
@@ -299,6 +279,7 @@ impl ProximityGraph {
                             for (word1, word2) in product_derivations {
                                 for proximity in 0..7 {
                                     // TODO: do the opposite way with a proximity penalty as well!
+                                    // TODO: search for proximity+1, I guess?
                                     if cache
                                         .get_word_pair_proximity_docids(
                                             index, txn, word1, word2, proximity,
@@ -370,7 +351,7 @@ impl ProximityGraph {
     }
     pub fn graphviz(&self) -> String {
         let mut desc = String::new();
-        desc.push_str("digraph G {\nrankdir = LR;\n");
+        desc.push_str("digraph G {\nrankdir = LR;\nnode [shape = \"record\"]\n");
 
         for node in 0..self.query.nodes.len() {
             if matches!(self.query.nodes[node], QueryNode::Deleted) {
@@ -394,10 +375,12 @@ impl ProximityGraph {
                     }
                     ProximityEdges::Pairs(pairs) => {
                         for (cost, pairs) in pairs.iter().enumerate() {
-                            desc.push_str(&format!(
-                                "{node} -> {destination} [label = \"cost {cost}, {} pairs\"];\n",
-                                pairs.len()
-                            ));
+                            if !pairs.is_empty() {
+                                desc.push_str(&format!(
+                                    "{node} -> {destination} [label = \"cost {cost}, {} pairs\"];\n",
+                                    pairs.len()
+                                ));
+                            }
                         }
                     }
                 }

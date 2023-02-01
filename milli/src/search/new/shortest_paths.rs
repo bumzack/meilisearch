@@ -209,6 +209,7 @@ mod tests {
     use charabia::Tokenize;
 
     use crate::{
+        db_snap,
         index::tests::TempIndex,
         search::new::{
             proximity_graph::{ProximityGraph, ProximityGraphCache, WordPairProximityCache},
@@ -219,34 +220,44 @@ mod tests {
 
     #[test]
     fn build_graph() {
-        let index = TempIndex::new();
+        let mut index = TempIndex::new();
+        index.index_documents_config.autogenerate_docids = true;
+        index
+            .update_settings(|s| {
+                s.set_searchable_fields(vec!["text".to_owned()]);
+            })
+            .unwrap();
+
+        index
+            .add_documents(documents!([
+                {
+                    "text": "0 1 2 3 4 5"
+                },
+                {
+                    "text": "0 a 1 b 2 3 4 5"
+                },
+                {
+                    "text": "0 a 1 b 3 a 4 b 5"
+                },
+                {
+                    "text": "0 a a 1 b 2 3 4 5"
+                },
+                {
+                    "text": "0 a a a a 1 b 3 45"
+                },
+            ]))
+            .unwrap();
+
+        db_snap!(index, word_pair_proximity_docids, @"");
+
         let txn = index.read_txn().unwrap();
         let fst = index.words_fst(&txn).unwrap();
         let query =
-            LocatedQueryTerm::from_query("0 1 \"2 3\" 4 5".tokenize(), None, |word, is_prefix| {
+            LocatedQueryTerm::from_query("0 1 2 3 4 5".tokenize(), None, |word, is_prefix| {
                 word_derivations_max_typo_1(&index, &txn, word, is_prefix, &fst)
             })
             .unwrap();
         let mut graph = QueryGraph::from_query(&index, &txn, query).unwrap();
-
-        // println!("{graph:?}");
-        // println!("{}", graph.graphviz());
-
-        // let positions_to_remove = vec![3, 6, 0, 4];
-        // for p in positions_to_remove {
-        //     graph.remove_words_at_position(p);
-        //     println!("{}", graph.graphviz());
-        // }
-
-        let proximities = |w1: &str, w2: &str| -> Vec<i8> {
-            if matches!((w1, w2), ("0", "1")) {
-                // Instead of no proximities, it should be a constant (e.g. 8)
-                // matching all documents
-                vec![]
-            } else {
-                vec![1, 2]
-            }
-        };
 
         let mut word_pair_proximity_cache = WordPairProximityCache { cache: HashMap::default() };
         let mut cache = ProximityGraphCache { word_pair_proximity: &mut word_pair_proximity_cache };
@@ -256,15 +267,15 @@ mod tests {
 
         println!("{}", prox_graph.graphviz());
 
-        let mut state = prox_graph
-            .initialize_shortest_paths_state(prox_graph.query.root_node, prox_graph.query.end_node)
-            .unwrap();
-        for _ in 0..6 {
-            if !prox_graph.compute_next_shortest_path(&mut state) {
-                break;
-            }
-            // println!("\n===========\n{}===========\n", prox_graph.graphviz());
-        }
+        // let mut state = prox_graph
+        //     .initialize_shortest_paths_state(prox_graph.query.root_node, prox_graph.query.end_node)
+        //     .unwrap();
+        // for _ in 0..6 {
+        //     if !prox_graph.compute_next_shortest_path(&mut state) {
+        //         break;
+        //     }
+        //     // println!("\n===========\n{}===========\n", prox_graph.graphviz());
+        // }
         // for Path { nodes, cost } in state.paths_a {
         //     println!("cost: {cost}");
         //     println!("nodes: {nodes:?}");

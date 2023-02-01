@@ -243,6 +243,7 @@ impl Debug for QueryNode {
                         if *use_prefix_db {
                             write!(f, " | +prefix_db")?;
                         }
+                        write!(f, " | pos:{}..={}", term.positions.start(), term.positions.end())?;
                         write!(f, "\"")?;
                         /*
                         "beautiful" [label = "<f0> beautiful | beauiful | beautifol"]
