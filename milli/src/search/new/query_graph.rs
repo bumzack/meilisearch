@@ -109,7 +109,7 @@ impl QueryGraph {
                                 derivations: WordDerivations {
                                     original: ngram2_str.clone(),
                                     // TODO: could add a typo if it's an ngram?
-                                    zero_typo: Some(ngram2_str),
+                                    zero_typo: vec![ngram2_str],
                                     one_typo: vec![],
                                     two_typos: vec![],
                                     use_prefix_db: false,
@@ -134,7 +134,7 @@ impl QueryGraph {
                                 derivations: WordDerivations {
                                     original: ngram3_str.clone(),
                                     // TODO: could add a typo if it's an ngram?
-                                    zero_typo: Some(ngram3_str),
+                                    zero_typo: vec![ngram3_str],
                                     one_typo: vec![],
                                     two_typos: vec![],
                                     use_prefix_db: false,
@@ -230,9 +230,24 @@ impl Debug for QueryNode {
                         WordDerivations { original, zero_typo, one_typo, two_typos, use_prefix_db },
                 } => {
                     if term.is_empty() {
-                        write!(f, "{original} (∅)")
+                        write!(f, "\"{original} (∅)\"")
                     } else {
-                        write!(f, "{zero_typo:?} {one_typo:?} {two_typos:?} {use_prefix_db}")
+                        let derivations = std::iter::once(original.clone())
+                            .chain(zero_typo.iter().map(|s| format!("T0 .. {s}")))
+                            .chain(one_typo.iter().map(|s| format!("T1 .. {s}")))
+                            .chain(two_typos.iter().map(|s| format!("T2 .. {s}")))
+                            .collect::<Vec<String>>()
+                            .join(" | ");
+
+                        write!(f, "\"{derivations}")?;
+                        if *use_prefix_db {
+                            write!(f, " | +prefix_db")?;
+                        }
+                        write!(f, "\"")?;
+                        /*
+                        "beautiful" [label = "<f0> beautiful | beauiful | beautifol"]
+                        */
+                        Ok(())
                     }
                 }
                 QueryTerm::Phrase(ws) => {
@@ -271,7 +286,13 @@ mod tests {
     impl QueryGraph {
         pub fn graphviz(&self) -> String {
             let mut desc = String::new();
-            desc.push_str("digraph G {\nrankdir = LR;\n");
+            desc.push_str(
+                r#"
+digraph G {
+rankdir = LR;
+node [shape = "record"]
+"#,
+            );
 
             for node in 0..self.nodes.len() {
                 if matches!(self.nodes[node], QueryNode::Deleted) {
@@ -309,7 +330,7 @@ mod tests {
             .unwrap();
         index
             .add_documents(documents!({
-                "text": "0 1 2 3 4 5 6 7 01 23 234 56",
+                "text": "0 1 2 3 4 5 6 7 01 23 234 56 79 709 7356",
             }))
             .unwrap();
 

@@ -15,15 +15,19 @@ use std::{borrow::Cow, mem, ops::RangeInclusive};
 
 #[derive(Debug, Clone)]
 pub struct WordDerivations {
+    // TODO: should have a list for the words corresponding to the prefix as well!
     pub original: String,
-    pub zero_typo: Option<String>,
+    pub zero_typo: Vec<String>,
     pub one_typo: Vec<String>,
     pub two_typos: Vec<String>,
     pub use_prefix_db: bool,
 }
 impl WordDerivations {
-    pub fn zero_typo_word(&self) -> Option<&str> {
-        self.zero_typo.as_deref()
+    fn is_empty(&self) -> bool {
+        self.zero_typo.is_empty()
+            && self.one_typo.is_empty()
+            && self.two_typos.is_empty()
+            && !self.use_prefix_db
     }
 }
 
@@ -44,9 +48,11 @@ pub fn word_derivations_max_typo_1(
         use_prefix_db = true;
     }
 
-    let mut zero_typo = Option::None;
-    let mut one_typo = Vec::new();
-    let mut two_typos = Vec::new();
+    let mut zero_typo = vec![];
+    let mut one_typo = vec![];
+    let mut two_typos = vec![];
+
+    // TODO: get all word derivations, not just those with one typo
 
     let dfa = build_dfa(word, 1, is_prefix && !use_prefix_db);
     let starts = StartsWith(Str::new(get_first(word)));
@@ -57,7 +63,7 @@ pub fn word_derivations_max_typo_1(
         let d = dfa.distance(state.1);
         match d.to_u8() {
             0 => {
-                zero_typo = Some(word.to_owned());
+                zero_typo.push(word.to_owned());
             }
             1 => {
                 one_typo.push(word.to_string());
@@ -83,7 +89,13 @@ impl QueryTerm {
     pub fn original_single_word(&self) -> Option<&str> {
         match self {
             QueryTerm::Phrase(_) => None,
-            QueryTerm::Word { derivations } => derivations.zero_typo_word(),
+            QueryTerm::Word { derivations } => {
+                if derivations.is_empty() {
+                    None
+                } else {
+                    Some(derivations.original.as_str())
+                }
+            }
         }
     }
 }
@@ -98,12 +110,7 @@ impl LocatedQueryTerm {
     pub fn is_empty(&self) -> bool {
         match &self.value {
             QueryTerm::Phrase(_) => false,
-            QueryTerm::Word { derivations, .. } => {
-                derivations.zero_typo.is_none()
-                    && derivations.one_typo.is_empty()
-                    && derivations.two_typos.is_empty()
-                    && !derivations.use_prefix_db
-            }
+            QueryTerm::Word { derivations, .. } => derivations.is_empty(),
         }
     }
     /// Create primitive query from tokenized query string,

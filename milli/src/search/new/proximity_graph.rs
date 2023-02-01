@@ -199,7 +199,7 @@ impl ProximityGraph {
                             (
                                 WordDerivations {
                                     original: original.clone(),
-                                    zero_typo: Some(original),
+                                    zero_typo: vec![original],
                                     one_typo: vec![],
                                     two_typos: vec![],
                                     use_prefix_db: false,
@@ -212,7 +212,7 @@ impl ProximityGraph {
                 QueryNode::Start => (
                     WordDerivations {
                         original: String::new(),
-                        zero_typo: None,
+                        zero_typo: vec![],
                         one_typo: vec![],
                         two_typos: vec![],
                         use_prefix_db: false,
@@ -240,7 +240,7 @@ impl ProximityGraph {
                                         (
                                             WordDerivations {
                                                 original: original.clone(),
-                                                zero_typo: Some(original),
+                                                zero_typo: vec![original],
                                                 one_typo: vec![],
                                                 two_typos: vec![],
                                                 use_prefix_db: false,
@@ -253,7 +253,7 @@ impl ProximityGraph {
                             QueryNode::Start => (
                                 WordDerivations {
                                     original: String::new(),
-                                    zero_typo: None,
+                                    zero_typo: vec![],
                                     one_typo: vec![],
                                     two_typos: vec![],
                                     use_prefix_db: false,
