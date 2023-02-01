@@ -38,6 +38,7 @@ impl<'c, 't> ResolveQueryGraphCache<'c, 't> {
         let bitmap_ptr = match self.word_docids.cache.entry(word.to_owned()) {
             Entry::Occupied(bitmap_ptr) => bitmap_ptr.get(),
             Entry::Vacant(entry) => {
+                println!("access word docids db!");
                 let Some(bitmap_ptr) = index.word_docids.remap_data_type::<ByteSlice>().get(txn, word)? else {
                     todo!();
                 };
@@ -53,9 +54,11 @@ impl<'c, 't> ResolveQueryGraphCache<'c, 't> {
         txn: &'t RoTxn,
         prefix: &str,
     ) -> Result<&'t [u8]> {
+        // In the future, this will be a frozen roaring bitmap
         let bitmap_ptr = match self.prefix_docids.cache.entry(prefix.to_owned()) {
             Entry::Occupied(bitmap_ptr) => bitmap_ptr.get(),
             Entry::Vacant(entry) => {
+                println!("access prefix db!");
                 let Some(bitmap_ptr) = index.word_prefix_docids.remap_data_type::<ByteSlice>().get(txn, prefix)? else {
                     todo!();
                 };
@@ -103,7 +106,7 @@ pub fn resolve_query_graph(
         let predecessors_docids = MultiOps::union(predecessors_iter);
 
         let n = &q.nodes[node];
-        println!("resolving {node} {n:?}, predecessors: {predecessors:?}, their docids: {predecessors_docids:?}");
+        // println!("resolving {node} {n:?}, predecessors: {predecessors:?}, their docids: {predecessors_docids:?}");
         let node_docids = match n {
             super::QueryNode::Term(located_term) => {
                 let term = &located_term.value;
@@ -130,6 +133,8 @@ pub fn resolve_query_graph(
                             .map(|slice| RoaringBitmapCodec::bytes_decode(slice).unwrap());
                         let or = MultiOps::union(or_iter);
                         // TODO: if `or` is empty, register that somewhere, and immediately return an empty bitmap
+                        // TODO: Or we don't do anything and accumulate all these operations in a tree of operations
+                        // between frozen roaring bitmap that is resolved only at the very end
                         predecessors_docids & or
                     }
                 }
@@ -145,17 +150,19 @@ pub fn resolve_query_graph(
         nodes_resolved.insert(node);
         println!("resolved up to {node}: {node_docids:?}\n");
         nodes_docids[node] = node_docids;
+
         for &succ in q.edges[node].outgoing.iter() {
             if !next_nodes_to_visit.contains(&succ) && !nodes_resolved.contains(&succ) {
                 next_nodes_to_visit.push_back(succ);
             }
         }
+        // This is currently slow but could easily be implemented very efficiently
         for &prec in q.edges[node].incoming.iter() {
             if q.edges[prec].outgoing.is_subset(&nodes_resolved) {
                 nodes_docids[prec].clear();
             }
         }
-        println!("cached docids: {nodes_docids:?}");
+        // println!("cached docids: {nodes_docids:?}");
     }
 
     panic!()
