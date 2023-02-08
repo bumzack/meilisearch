@@ -1,4 +1,7 @@
-use std::collections::{hash_map::Entry, HashMap};
+use std::{
+    array,
+    collections::{hash_map::Entry, HashMap},
+};
 
 use heed::{types::ByteSlice, RoTxn};
 use itertools::Itertools;
@@ -11,23 +14,82 @@ use super::{
 };
 
 pub enum ProximityEdges {
-    NonExistent,
-    Unconditional { cost: u8 },
-    Pairs([Vec<WordPair>; 8]),
+    Unconditional { cost: Option<u8> },
+    Pairs { pairs: [Vec<WordPair>; 8], leftover_cost: Option<u8> },
 }
-impl Default for ProximityEdges {
-    fn default() -> Self {
-        Self::NonExistent
-    }
-}
+
 impl ProximityEdges {
+    pub fn remove_edge(&mut self, edge: &ProximityEdge) {
+        match (self, edge) {
+            (
+                ProximityEdges::Unconditional { cost: self_cost },
+                ProximityEdge::Unconditional { cost },
+            ) => {
+                if let Some(self_cost) = self_cost {
+                    assert_eq!(cost, self_cost);
+                }
+                *self_cost = None;
+            }
+            (ProximityEdges::Pairs { pairs, .. }, ProximityEdge::Pair { cost, .. }) => {
+                assert!(!pairs[*cost as usize].is_empty());
+                pairs[*cost as usize] = vec![];
+            }
+            (
+                ProximityEdges::Pairs { leftover_cost: self_leftover_cost, .. },
+                ProximityEdge::Leftover { cost },
+            ) => {
+                if let Some(self_leftover_cost) = self_leftover_cost {
+                    assert_eq!(cost, self_leftover_cost);
+                }
+                *self_leftover_cost = None;
+            }
+            (ProximityEdges::Unconditional { .. }, ProximityEdge::Pair { .. })
+            | (ProximityEdges::Pairs { .. }, ProximityEdge::Unconditional { .. })
+            | (ProximityEdges::Unconditional { .. }, ProximityEdge::Leftover { .. }) => {
+                panic!()
+            }
+        }
+    }
+    pub fn restore_edge(&mut self, edge: &ProximityEdge) {
+        match (self, edge) {
+            (
+                ProximityEdges::Unconditional { cost: existing_cost @ None },
+                ProximityEdge::Unconditional { cost },
+            ) => *existing_cost = Some(*cost),
+
+            (ProximityEdges::Pairs { pairs, .. }, ProximityEdge::Pair { cost, word_pairs }) => {
+                assert!(pairs[*cost as usize].is_empty());
+                pairs[*cost as usize] = word_pairs.clone();
+            }
+            (
+                ProximityEdges::Pairs { leftover_cost: leftover_cost @ None, .. },
+                ProximityEdge::Leftover { cost },
+            ) => *leftover_cost = Some(*cost),
+            (
+                ProximityEdges::Pairs { pairs: _, leftover_cost: Some(_) },
+                ProximityEdge::Leftover { cost: _ },
+            ) => {
+                panic!()
+            }
+            (ProximityEdges::Unconditional { .. }, ProximityEdge::Leftover { .. }) => todo!(),
+            (
+                ProximityEdges::Unconditional { cost: Some(_) },
+                ProximityEdge::Unconditional { .. },
+            ) => todo!(),
+            (ProximityEdges::Unconditional { .. }, ProximityEdge::Pair { .. }) => todo!(),
+            (ProximityEdges::Pairs { .. }, ProximityEdge::Unconditional { .. }) => todo!(),
+        }
+    }
     pub fn cheapest_edge(&self) -> Option<ProximityEdge> {
         match self {
-            ProximityEdges::NonExistent => None,
             ProximityEdges::Unconditional { cost } => {
-                Some(ProximityEdge::Unconditional { cost: *cost })
+                if let Some(cost) = cost {
+                    Some(ProximityEdge::Unconditional { cost: *cost })
+                } else {
+                    None
+                }
             }
-            ProximityEdges::Pairs(pairs) => {
+            ProximityEdges::Pairs { pairs, leftover_cost } => {
                 for (cost, pairs) in pairs.iter().enumerate() {
                     if !pairs.is_empty() {
                         return Some(ProximityEdge::Pair {
@@ -36,55 +98,21 @@ impl ProximityEdges {
                         });
                     }
                 }
-                return None;
+                if let Some(leftover_cost) = leftover_cost {
+                    Some(ProximityEdge::Leftover { cost: *leftover_cost })
+                } else {
+                    None
+                }
             }
         }
     }
-    fn from_edge(edge: ProximityEdge) -> Self {
-        match edge {
-            ProximityEdge::Unconditional { cost } => Self::Unconditional { cost },
-            ProximityEdge::Pair { cost, word_pairs } => {
-                let mut pairs = std::array::from_fn(|_| vec![]);
-                pairs[cost as usize] = word_pairs;
-                Self::Pairs(pairs)
-            }
-        }
-    }
-    pub fn add_edge(&mut self, edge: ProximityEdge) {
-        let result = match (std::mem::take(self), edge) {
-            (ProximityEdges::NonExistent, edge) => Self::from_edge(edge),
-            (ProximityEdges::Unconditional { cost }, _) => panic!(),
-            (ProximityEdges::Pairs(_), ProximityEdge::Unconditional { cost }) => panic!(),
-            (ProximityEdges::Pairs(pairs), ProximityEdge::Pair { cost, word_pairs }) => {
-                let mut pairs = pairs.clone();
-                assert!(pairs[cost as usize].is_empty());
-                pairs[cost as usize] = word_pairs;
-                Self::Pairs(pairs)
-            }
-        };
-        *self = result;
-    }
-    // pub fn possible_costs(&self) -> Vec<u8> {
-    //     match self {
-    //         ProximityEdges::NonExistent => vec![],
-    //         ProximityEdges::Unconditional { cost } => vec![*cost],
-    //         ProximityEdges::Pairs(pairs) => {
-    //             let mut costs = vec![];
-    //             for (cost, pair) in pairs.iter().enumerate() {
-    //                 if !pair.is_empty() {
-    //                     costs.push(cost as u8);
-    //                 }
-    //             }
-    //             costs
-    //         }
-    //     }
-    // }
 }
 #[derive(Debug, Clone)]
 pub enum ProximityEdge {
     Unconditional { cost: u8 },
     // TODO: Vec<WordPair> could be in a reference counted cell
     Pair { cost: u8, word_pairs: Vec<WordPair> },
+    Leftover { cost: u8 },
 }
 impl PartialEq for ProximityEdge {
     fn eq(&self, other: &Self) -> bool {
@@ -104,7 +132,11 @@ impl ProximityEdge {
     pub fn cost(&self) -> u8 {
         match self {
             ProximityEdge::Unconditional { cost } => *cost,
-            ProximityEdge::Pair { cost, .. } => *cost,
+            ProximityEdge::Pair { cost, word_pairs } => {
+                assert!(!word_pairs.is_empty());
+                *cost
+            }
+            ProximityEdge::Leftover { cost } => *cost,
         }
     }
 }
@@ -119,9 +151,14 @@ pub struct WordPairProximityCache<'t> {
     // TODO: something more efficient than hashmap
     pub cache: HashMap<(u8, String, String), Option<&'t [u8]>>,
 }
+pub struct WordPrefixPairProximityCache<'t> {
+    // TODO: something more efficient than hashmap
+    pub cache: HashMap<(u8, String, String), Option<&'t [u8]>>,
+}
 
 pub struct ProximityGraphCache<'c, 't> {
     pub word_pair_proximity: &'c mut WordPairProximityCache<'t>,
+    pub word_prefix_pair_proximity: &'c mut WordPrefixPairProximityCache<'t>,
 }
 impl<'c, 't> ProximityGraphCache<'c, 't> {
     pub fn get_word_pair_proximity_docids(
@@ -162,6 +199,27 @@ impl<'c, 't> ProximityGraphCache<'c, 't> {
                 //  }
                 let bitmap_ptr = index
                     .word_pair_proximity_docids
+                    .remap_data_type::<ByteSlice>()
+                    .get(txn, &(key.0, key.1.as_str(), key.2.as_str()))?;
+                entry.insert(bitmap_ptr);
+                Ok(bitmap_ptr)
+            }
+        }
+    }
+    pub fn get_word_prefix_pair_proximity_docids(
+        &mut self,
+        index: &Index,
+        txn: &'t RoTxn,
+        word1: &str,
+        prefix2: &str,
+        proximity: u8,
+    ) -> Result<Option<&'t [u8]>> {
+        let key = (proximity, word1.to_owned(), prefix2.to_owned());
+        match self.word_prefix_pair_proximity.cache.entry(key.clone()) {
+            Entry::Occupied(bitmap_ptr) => Ok(*bitmap_ptr.get()),
+            Entry::Vacant(entry) => {
+                let bitmap_ptr = index
+                    .word_prefix_pair_proximity_docids
                     .remap_data_type::<ByteSlice>()
                     .get(txn, &(key.0, key.1.as_str(), key.2.as_str()))?;
                 entry.insert(bitmap_ptr);
@@ -248,9 +306,10 @@ impl ProximityGraph {
                             // TODO: how should this actually be handled?
                             // We want to effectively ignore this pair of terms
                             // Unconditionally walk through the edge without computing the docids
-                            ProximityEdges::Unconditional { cost: 0 }
+                            // But also what should the cost be?
+                            ProximityEdges::Unconditional { cost: Some(0) }
                         } else {
-                            // TODO: manage the `use_prefix DB case`
+                            // TODO: manage the `use_prefix_db` case
                             // There are a few shortcuts to take there to avoid performing
                             // really expensive operations
                             let WordDerivations {
@@ -265,7 +324,7 @@ impl ProximityGraph {
                                 zero_typo: zt2,
                                 one_typo: ot2,
                                 two_typos: tt2,
-                                use_prefix_db: _, // TODO
+                                use_prefix_db: upd2, // TODO
                             } = derivations2;
 
                             // left term cannot be a prefix
@@ -275,12 +334,26 @@ impl ProximityGraph {
                             let derivations2 = zt2.iter().chain(ot2.iter()).chain(tt2.iter());
                             let product_derivations = derivations1.cartesian_product(derivations2);
 
-                            let mut proximity_word_pairs: [_; 8] = std::array::from_fn(|_| vec![]);
+                            let mut proximity_word_pairs: [_; 8] = array::from_fn(|_| vec![]);
                             for (word1, word2) in product_derivations {
                                 for proximity in 0..7 {
                                     // TODO: do the opposite way with a proximity penalty as well!
                                     // TODO: search for proximity+1, I guess?
-                                    if cache
+                                    if upd2 {
+                                        if cache
+                                            .get_word_prefix_pair_proximity_docids(
+                                                index, txn, word1, word2, proximity,
+                                            )?
+                                            .is_some()
+                                        {
+                                            proximity_word_pairs[proximity as usize].push(
+                                                WordPair::WordPrefix {
+                                                    left: word1.to_owned(),
+                                                    right_prefix: word2.to_owned(),
+                                                },
+                                            );
+                                        } // else what?
+                                    } else if cache
                                         .get_word_pair_proximity_docids(
                                             index, txn, word1, word2, proximity,
                                         )?
@@ -293,19 +366,20 @@ impl ProximityGraph {
                                             },
                                         );
                                     }
+                                    // else what?
                                 }
                             }
-                            if proximity_word_pairs.is_empty() {
-                                ProximityEdges::Unconditional { cost: 8 }
-                            } else {
-                                ProximityEdges::Pairs(proximity_word_pairs)
+                            ProximityEdges::Pairs {
+                                pairs: proximity_word_pairs,
+                                leftover_cost: Some(8),
                             }
                         };
 
                         prox_edges.insert(successor_idx, proxs);
                     }
                     QueryNode::End => {
-                        prox_edges.insert(successor_idx, ProximityEdges::Unconditional { cost: 0 });
+                        prox_edges
+                            .insert(successor_idx, ProximityEdges::Unconditional { cost: Some(0) });
                     }
                     _ => continue,
                 }
@@ -367,13 +441,18 @@ impl ProximityGraph {
 
             for (destination, proximities) in self.proximity_edges[node].iter() {
                 match proximities {
-                    ProximityEdges::NonExistent => {}
                     ProximityEdges::Unconditional { cost } => {
-                        desc.push_str(&format!(
-                            "{node} -> {destination} [label = \"always cost {cost}\"];\n"
-                        ));
+                        if let Some(cost) = cost {
+                            desc.push_str(&format!(
+                                "{node} -> {destination} [label = \"always cost {cost}\"];\n"
+                            ));
+                        } else {
+                            desc.push_str(&format!(
+                                "{node} -> {destination} [label = \"impossible\"];\n"
+                            ));
+                        }
                     }
-                    ProximityEdges::Pairs(pairs) => {
+                    ProximityEdges::Pairs { pairs, leftover_cost } => {
                         for (cost, pairs) in pairs.iter().enumerate() {
                             if !pairs.is_empty() {
                                 desc.push_str(&format!(
@@ -381,6 +460,15 @@ impl ProximityGraph {
                                     pairs.len()
                                 ));
                             }
+                        }
+                        if let Some(leftover_cost) = leftover_cost {
+                            desc.push_str(&format!(
+                                "{node} -> {destination} [label = \"remaining cost {leftover_cost}\"];\n",
+                            ));
+                        } else {
+                            desc.push_str(&format!(
+                                "{node} -> {destination} [label = \"remaining cost impossible\"];\n",
+                            ));
                         }
                     }
                 }

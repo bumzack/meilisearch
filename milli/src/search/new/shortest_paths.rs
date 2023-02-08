@@ -1,17 +1,16 @@
+use super::proximity_graph::{ProximityEdge, ProximityGraph};
 use std::collections::HashSet;
 
-use super::proximity_graph::{ProximityEdge, ProximityEdges, ProximityGraph};
-
 #[derive(Clone, Debug, PartialEq)]
-pub struct PathNode {
+pub struct PathEdge {
     pub from: usize,
     pub to: usize,
-    pub edge: ProximityEdge,
+    pub proximity_edge: ProximityEdge,
 }
 
 #[derive(Debug)]
 pub struct Path {
-    pub nodes: Vec<PathNode>,
+    pub edges: Vec<PathEdge>,
     pub cost: u64,
 }
 
@@ -41,8 +40,8 @@ struct Dijkstra {
 
 pub struct ShortestPathsState {
     to: usize,
-    k: usize,
-    paths_a: Vec<Path>,
+    // k: usize,
+    shortest_paths: Vec<Path>,
     paths_b: Vec<Path>,
 }
 
@@ -92,13 +91,17 @@ impl ProximityGraph {
         let mut cur = to;
         // let mut edge_costs = vec![];
         // let mut distances = vec![];
-        let mut nodes = vec![];
+        let mut path_edges = vec![];
         while let Some(n) = dijkstra.paths[cur] {
-            nodes.push(PathNode { from: n, to: cur, edge: dijkstra.edges[cur].clone() });
+            path_edges.push(PathEdge {
+                from: n,
+                to: cur,
+                proximity_edge: dijkstra.edges[cur].clone(),
+            });
             cur = n;
         }
-        nodes.reverse();
-        Some(Path { nodes, cost: dijkstra.distances[to] })
+        path_edges.reverse();
+        Some(Path { edges: path_edges, cost: dijkstra.distances[to] })
     }
 
     pub fn initialize_shortest_paths_state(
@@ -109,76 +112,73 @@ impl ProximityGraph {
         let Some(shortest_path) = self.shortest_path(from, to) else {
             return None
         };
-        let paths_a = vec![shortest_path];
+        let shortest_paths = vec![shortest_path];
         let paths_b = Vec::<Path>::new();
-        let k = 0;
-        Some(ShortestPathsState { to, k, paths_a, paths_b })
+        // let k = 0;
+        Some(ShortestPathsState { to, shortest_paths, paths_b })
     }
 
     pub fn compute_next_shortest_path(&mut self, state: &mut ShortestPathsState) -> bool {
-        state.k += 1;
+        // state.k += 1;
+        // assert_eq!(state.paths_a.len(), state.k);
         // println!("{:?}", state.paths_a);
-        for (i, PathNode { from: spur_node, to: _, edge: _ }) in state.paths_a[state.k - 1].nodes
-            [..state.paths_a[state.k - 1].nodes.len() - 2]
-            .iter()
-            .enumerate()
+
+        let last_shortest_path = state.shortest_paths.last().unwrap();
+        // nodes of last shortest path except the last one
+        let nodes_of_last_shortest_path =
+            &last_shortest_path.edges[..last_shortest_path.edges.len() - 2];
+
+        for (i, PathEdge { from: spur_node, to: _, proximity_edge: _ }) in
+            nodes_of_last_shortest_path.iter().enumerate()
         {
-            let root_cost = state.paths_a[state.k - 1].nodes[..i]
-                .iter()
-                .fold(0, |sum, next| sum + next.edge.cost() as u64);
+            let root_path = &last_shortest_path.edges[..i];
+            let root_cost =
+                root_path.iter().fold(0, |sum, next| sum + next.proximity_edge.cost() as u64);
             // let (spur_node, root_cost) = A[k_i - 1].nodes[i];
-            let root_path = &state.paths_a[state.k - 1].nodes[..i];
+            // let root_path = &last_shortest_path.nodes[..i];
             // println!("spur_node: {spur_node}, root_cost: {root_cost}, root path: {root_path:?}");
+
+            // could be a set to avoid removing/restoring the same edge multiple times
             let mut removed_edges = vec![];
-            for p in &state.paths_a {
-                if root_path == &p.nodes[..i] {
+            // println!("state.paths_a: {:?}", state.paths_a);
+
+            // for all the paths already found that share a common prefix with the root path
+            // we delete the edge from the spur node
+            for p in &state.shortest_paths {
+                // we go through the path and remove its edges from the graph
+                // but it's possible to remove the same edge multiple times!
+                if root_path == &p.edges[..i] {
                     // remove every edge from i to i+1 in the graph
                     // println!("remove edge: {:?}", p.nodes[i].1);
-                    let all_prox_edges = &mut self.proximity_edges[p.nodes[i].from];
-                    let cost_to_remove = p.nodes[i].edge.cost();
-                    let prox_edges = all_prox_edges.get_mut(&p.nodes[i].to).unwrap();
+                    // access the proximity edges using the index of the from node of the path's edge
+                    let all_prox_edges = &mut self.proximity_edges[p.edges[i].from];
+                    // possible to remove an edge simply from its cost?
+                    let edge_to_remove = &p.edges[i].proximity_edge;
+                    // let cost_to_remove = p.nodes[i].edge.cost();
+                    let prox_edges = all_prox_edges.get_mut(&p.edges[i].to).unwrap();
+
                     // TODO: we should verify that prox_edges contain `p.nodes[i].edge` here
-                    match prox_edges {
-                        ProximityEdges::NonExistent => {
-                            // TODO: should this be impossible?
-                            todo!();
-                            continue;
-                        }
-                        ProximityEdges::Unconditional { cost } => {
-                            if cost_to_remove == *cost {
-                                *prox_edges = ProximityEdges::NonExistent;
-                            } else {
-                                // TODO: should this be impossible?
-                                todo!();
-                                continue;
-                            }
-                        }
-                        ProximityEdges::Pairs(pairs) => {
-                            if pairs[cost_to_remove as usize].is_empty() {
-                                // TODO: should this be impossible?
-                                todo!();
-                                continue;
-                            } else {
-                                pairs[cost_to_remove as usize] = vec![];
-                            }
-                        }
-                    }
+                    prox_edges.remove_edge(edge_to_remove);
                     // let edges_to_remove = self.proximity_edges[i].get_mut(&dest).unwrap();
-                    removed_edges.push(p.nodes[i].clone());
+                    removed_edges.push(p.edges[i].clone());
                 }
             }
             // println!("{}", self.graphviz());
             let spur_path = self.shortest_path(*spur_node, state.to);
 
-            for PathNode { from: removed_edge_src, to: removed_edge_dest, edge: removed_edge } in
-                removed_edges
+            // println!("removed edges: {removed_edges:?}");
+
+            for PathEdge {
+                from: removed_edge_src,
+                to: removed_edge_dest,
+                proximity_edge: removed_edge,
+            } in removed_edges
             {
+                // TODO: can it be that it doesn't exist?
                 self.proximity_edges[removed_edge_src]
-                    .entry(removed_edge_dest)
-                    .or_default()
-                    // TODO: should also restore the word pairs here
-                    // should the paths contain ProximityEdges?
-                    .add_edge(removed_edge);
+                    .get_mut(&removed_edge_dest)
+                    .unwrap()
+                    .restore_edge(&removed_edge);
             }
 
             // println!("root path: {root_path:?}");
@@ -187,7 +187,7 @@ impl ProximityGraph {
             let Some(spur_path) = spur_path else { continue; };
 
             let total_path = Path {
-                nodes: root_path.iter().chain(spur_path.nodes.iter()).cloned().collect(),
+                edges: root_path.iter().chain(spur_path.edges.iter()).cloned().collect(),
                 cost: root_cost + spur_path.cost,
             };
             state.paths_b.push(total_path);
@@ -197,7 +197,7 @@ impl ProximityGraph {
         if state.paths_b.is_empty() {
             return false;
         }
-        state.paths_a.push(state.paths_b.pop().unwrap());
+        state.shortest_paths.push(state.paths_b.pop().unwrap());
         true
     }
 }
@@ -212,8 +212,12 @@ mod tests {
         db_snap,
         index::tests::TempIndex,
         search::new::{
-            proximity_graph::{ProximityGraph, ProximityGraphCache, WordPairProximityCache},
+            proximity_graph::{
+                ProximityGraph, ProximityGraphCache, WordPairProximityCache,
+                WordPrefixPairProximityCache,
+            },
             query_term::{word_derivations_max_typo_1, LocatedQueryTerm},
+            shortest_paths::Path,
             QueryGraph,
         },
     };
@@ -248,7 +252,7 @@ mod tests {
             ]))
             .unwrap();
 
-        db_snap!(index, word_pair_proximity_docids, @"");
+        db_snap!(index, word_pair_proximity_docids, @"679d1126b569b3e8b10dd937c3faedf9");
 
         let txn = index.read_txn().unwrap();
         let fst = index.words_fst(&txn).unwrap();
@@ -260,26 +264,31 @@ mod tests {
         let mut graph = QueryGraph::from_query(&index, &txn, query).unwrap();
 
         let mut word_pair_proximity_cache = WordPairProximityCache { cache: HashMap::default() };
-        let mut cache = ProximityGraphCache { word_pair_proximity: &mut word_pair_proximity_cache };
+        let mut word_prefix_pair_proximity_cache =
+            WordPrefixPairProximityCache { cache: HashMap::default() };
+        let mut cache = ProximityGraphCache {
+            word_pair_proximity: &mut word_pair_proximity_cache,
+            word_prefix_pair_proximity: &mut word_prefix_pair_proximity_cache,
+        };
 
         let mut prox_graph =
             ProximityGraph::from_query_graph(&index, &txn, graph, &mut cache).unwrap();
 
         println!("{}", prox_graph.graphviz());
 
-        // let mut state = prox_graph
-        //     .initialize_shortest_paths_state(prox_graph.query.root_node, prox_graph.query.end_node)
-        //     .unwrap();
-        // for _ in 0..6 {
-        //     if !prox_graph.compute_next_shortest_path(&mut state) {
-        //         break;
-        //     }
-        //     // println!("\n===========\n{}===========\n", prox_graph.graphviz());
-        // }
-        // for Path { nodes, cost } in state.paths_a {
-        //     println!("cost: {cost}");
-        //     println!("nodes: {nodes:?}");
-        // }
+        let mut state = prox_graph
+            .initialize_shortest_paths_state(prox_graph.query.root_node, prox_graph.query.end_node)
+            .unwrap();
+        for _ in 0..6 {
+            if !prox_graph.compute_next_shortest_path(&mut state) {
+                break;
+            }
+            // println!("\n===========\n{}===========\n", prox_graph.graphviz());
+        }
+        for Path { edges: nodes, cost } in state.shortest_paths {
+            println!("cost: {cost}");
+            println!("nodes: {nodes:?}");
+        }
         // println!("{k_paths:?}");
     }
 }
