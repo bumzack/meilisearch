@@ -5,140 +5,26 @@ use std::{
 
 use heed::{types::ByteSlice, RoTxn};
 use itertools::Itertools;
+use roaring::RoaringBitmap;
 
 use crate::{Index, Result};
 
 use super::{
     query_term::{LocatedQueryTerm, QueryTerm, WordDerivations},
+    shortest_paths::Path,
     QueryGraph, QueryNode,
 };
 
 pub enum ProximityEdges {
-    Unconditional { cost: Option<u8> },
-    Pairs { pairs: [Vec<WordPair>; 8], leftover_cost: Option<u8> },
-}
-
-impl ProximityEdges {
-    pub fn remove_edge(&mut self, edge: &ProximityEdge) {
-        match (self, edge) {
-            (
-                ProximityEdges::Unconditional { cost: self_cost },
-                ProximityEdge::Unconditional { cost },
-            ) => {
-                if let Some(self_cost) = self_cost {
-                    assert_eq!(cost, self_cost);
-                }
-                *self_cost = None;
-            }
-            (ProximityEdges::Pairs { pairs, .. }, ProximityEdge::Pair { cost, .. }) => {
-                assert!(!pairs[*cost as usize].is_empty());
-                pairs[*cost as usize] = vec![];
-            }
-            (
-                ProximityEdges::Pairs { leftover_cost: self_leftover_cost, .. },
-                ProximityEdge::Leftover { cost },
-            ) => {
-                if let Some(self_leftover_cost) = self_leftover_cost {
-                    assert_eq!(cost, self_leftover_cost);
-                }
-                *self_leftover_cost = None;
-            }
-            (ProximityEdges::Unconditional { .. }, ProximityEdge::Pair { .. })
-            | (ProximityEdges::Pairs { .. }, ProximityEdge::Unconditional { .. })
-            | (ProximityEdges::Unconditional { .. }, ProximityEdge::Leftover { .. }) => {
-                panic!()
-            }
-        }
-    }
-    pub fn restore_edge(&mut self, edge: &ProximityEdge) {
-        match (self, edge) {
-            (
-                ProximityEdges::Unconditional { cost: existing_cost @ None },
-                ProximityEdge::Unconditional { cost },
-            ) => *existing_cost = Some(*cost),
-
-            (ProximityEdges::Pairs { pairs, .. }, ProximityEdge::Pair { cost, word_pairs }) => {
-                assert!(pairs[*cost as usize].is_empty());
-                pairs[*cost as usize] = word_pairs.clone();
-            }
-            (
-                ProximityEdges::Pairs { leftover_cost: leftover_cost @ None, .. },
-                ProximityEdge::Leftover { cost },
-            ) => *leftover_cost = Some(*cost),
-            (
-                ProximityEdges::Pairs { pairs: _, leftover_cost: Some(_) },
-                ProximityEdge::Leftover { cost: _ },
-            ) => {
-                panic!()
-            }
-            (ProximityEdges::Unconditional { .. }, ProximityEdge::Leftover { .. }) => todo!(),
-            (
-                ProximityEdges::Unconditional { cost: Some(_) },
-                ProximityEdge::Unconditional { .. },
-            ) => todo!(),
-            (ProximityEdges::Unconditional { .. }, ProximityEdge::Pair { .. }) => todo!(),
-            (ProximityEdges::Pairs { .. }, ProximityEdge::Unconditional { .. }) => todo!(),
-        }
-    }
-    pub fn cheapest_edge(&self) -> Option<ProximityEdge> {
-        match self {
-            ProximityEdges::Unconditional { cost } => {
-                if let Some(cost) = cost {
-                    Some(ProximityEdge::Unconditional { cost: *cost })
-                } else {
-                    None
-                }
-            }
-            ProximityEdges::Pairs { pairs, leftover_cost } => {
-                for (cost, pairs) in pairs.iter().enumerate() {
-                    if !pairs.is_empty() {
-                        return Some(ProximityEdge::Pair {
-                            cost: cost as u8,
-                            word_pairs: pairs.clone(),
-                        });
-                    }
-                }
-                if let Some(leftover_cost) = leftover_cost {
-                    Some(ProximityEdge::Leftover { cost: *leftover_cost })
-                } else {
-                    None
-                }
-            }
-        }
-    }
-}
-#[derive(Debug, Clone)]
-pub enum ProximityEdge {
-    Unconditional { cost: u8 },
-    // TODO: Vec<WordPair> could be in a reference counted cell
-    Pair { cost: u8, word_pairs: Vec<WordPair> },
-    Leftover { cost: u8 },
-}
-impl PartialEq for ProximityEdge {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Unconditional { cost: l_cost }, Self::Unconditional { cost: r_cost }) => {
-                l_cost == r_cost
-            }
-            (
-                Self::Pair { cost: l_cost, word_pairs: l_word_pairs },
-                Self::Pair { cost: r_cost, word_pairs: r_word_pairs },
-            ) => l_cost == r_cost,
-            _ => false,
-        }
-    }
-}
-impl ProximityEdge {
-    pub fn cost(&self) -> u8 {
-        match self {
-            ProximityEdge::Unconditional { cost } => *cost,
-            ProximityEdge::Pair { cost, word_pairs } => {
-                assert!(!word_pairs.is_empty());
-                *cost
-            }
-            ProximityEdge::Leftover { cost } => *cost,
-        }
-    }
+    Unconditional {
+        cost: u8,
+    },
+    Pairs {
+        pairs: [Vec<WordPair>; 8],
+        /// The additional cost, added to the minimum cost of `8`, for the remaining
+        /// word pairs
+        leftover_cost_penalty: u8,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +117,15 @@ impl<'c, 't> ProximityGraphCache<'c, 't> {
 
 pub struct ProximityGraph {
     pub query: QueryGraph,
+    // Instead of an owned value of ProximityEdges, put each edge into a vector and
+    // store a pointer there
+    //
+    // or maybe not
+    //
+    // The point is to make it easy to cache the result of each edge in a vector
+    // of optional roaring bitmaps
+    // The alternative is to have a PathEdgeId as a key to the cache
+    //
     pub proximity_edges: Vec<HashMap<usize, ProximityEdges>>,
 }
 
@@ -307,7 +202,7 @@ impl ProximityGraph {
                             // We want to effectively ignore this pair of terms
                             // Unconditionally walk through the edge without computing the docids
                             // But also what should the cost be?
-                            ProximityEdges::Unconditional { cost: Some(0) }
+                            ProximityEdges::Unconditional { cost: 0 }
                         } else {
                             // TODO: manage the `use_prefix_db` case
                             // There are a few shortcuts to take there to avoid performing
@@ -371,15 +266,14 @@ impl ProximityGraph {
                             }
                             ProximityEdges::Pairs {
                                 pairs: proximity_word_pairs,
-                                leftover_cost: Some(8),
+                                leftover_cost_penalty: 0,
                             }
                         };
 
                         prox_edges.insert(successor_idx, proxs);
                     }
                     QueryNode::End => {
-                        prox_edges
-                            .insert(successor_idx, ProximityEdges::Unconditional { cost: Some(0) });
+                        prox_edges.insert(successor_idx, ProximityEdges::Unconditional { cost: 0 });
                     }
                     _ => continue,
                 }
@@ -442,17 +336,11 @@ impl ProximityGraph {
             for (destination, proximities) in self.proximity_edges[node].iter() {
                 match proximities {
                     ProximityEdges::Unconditional { cost } => {
-                        if let Some(cost) = cost {
-                            desc.push_str(&format!(
-                                "{node} -> {destination} [label = \"always cost {cost}\"];\n"
-                            ));
-                        } else {
-                            desc.push_str(&format!(
-                                "{node} -> {destination} [label = \"impossible\"];\n"
-                            ));
-                        }
+                        desc.push_str(&format!(
+                            "{node} -> {destination} [label = \"always cost {cost}\"];\n"
+                        ));
                     }
-                    ProximityEdges::Pairs { pairs, leftover_cost } => {
+                    ProximityEdges::Pairs { pairs, leftover_cost_penalty: leftover_cost } => {
                         for (cost, pairs) in pairs.iter().enumerate() {
                             if !pairs.is_empty() {
                                 desc.push_str(&format!(
@@ -461,15 +349,10 @@ impl ProximityGraph {
                                 ));
                             }
                         }
-                        if let Some(leftover_cost) = leftover_cost {
-                            desc.push_str(&format!(
-                                "{node} -> {destination} [label = \"remaining cost {leftover_cost}\"];\n",
-                            ));
-                        } else {
-                            desc.push_str(&format!(
-                                "{node} -> {destination} [label = \"remaining cost impossible\"];\n",
-                            ));
-                        }
+                        desc.push_str(&format!(
+                            "{node} -> {destination} [label = \"remaining cost {}\"];\n",
+                            leftover_cost + 8
+                        ));
                     }
                 }
             }
@@ -480,5 +363,24 @@ impl ProximityGraph {
 
         desc.push('}');
         desc
+    }
+}
+
+impl ProximityGraph {
+    fn resolve_paths(
+        &self,
+        index: &Index,
+        txn: &RoTxn,
+        cache: &ProximityGraphCache,
+        paths: &[Path],
+    ) -> RoaringBitmap {
+        // for each path, translate it to an intersection of cached roaring bitmaps
+        // then do a union for all paths
+
+        // get the docids of the given paths in the proximity graph
+        // in the fastest possible way
+        // 1. roaring MultiOps (before we can do the Frozen+AST thing)
+        // 2. minimize number of operations
+        todo!()
     }
 }
