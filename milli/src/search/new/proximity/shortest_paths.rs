@@ -1,8 +1,7 @@
+use std::collections::{BTreeMap, HashSet};
+
 use super::proximity_graph::{ProximityEdges, ProximityGraph};
-use std::{
-    cmp::Reverse,
-    collections::{BTreeMap, HashSet},
-};
+use crate::search::new::QueryNode;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Path {
@@ -17,26 +16,21 @@ struct DijkstraState {
     paths: Vec<Option<usize>>,
 }
 
-pub struct KShortestPathGraphWrapper<'g> {
-    graph: &'g ProximityGraph,
-    removed_edges: HashSet<PathEdgeId>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PathEdgeId {
-    from: usize,
-    to: usize,
-    cost: u8,
+    pub from: usize,
+    pub to: usize,
+    pub cost: u8,
 }
 
-impl<'g> KShortestPathGraphWrapper<'g> {
+impl ProximityGraph {
     fn cheapest_edge(&self, from: usize, to: usize) -> Option<PathEdgeId> {
-        let edges = self.graph.proximity_edges[from].get(&to)?;
+        let edges = self.proximity_edges[from].get(&to)?;
         match edges {
             ProximityEdges::Unconditional { cost } => {
                 let edge_id = PathEdgeId { from, to, cost: *cost };
 
-                if self.removed_edges.contains(&edge_id) {
+                if self.is_removed_edge(edge_id) {
                     None
                 } else {
                     Some(edge_id)
@@ -45,14 +39,14 @@ impl<'g> KShortestPathGraphWrapper<'g> {
             ProximityEdges::Pairs { pairs, leftover_cost_penalty } => {
                 for (pair_idx, word_pairs) in pairs.iter().enumerate() {
                     let edge_id = PathEdgeId { from, to, cost: pair_idx as u8 };
-                    if word_pairs.is_empty() || self.removed_edges.contains(&edge_id) {
+                    if word_pairs.is_empty() || self.is_removed_edge(edge_id) {
                         continue;
                     } else {
                         return Some(edge_id);
                     }
                 }
                 let edge_id = PathEdgeId { from, to, cost: 8 + leftover_cost_penalty };
-                if self.removed_edges.contains(&edge_id) {
+                if self.is_removed_edge(edge_id) {
                     None
                 } else {
                     Some(edge_id)
@@ -64,20 +58,20 @@ impl<'g> KShortestPathGraphWrapper<'g> {
 
 pub struct KShortestPathsState {
     to: usize,
-    shortest_paths: Vec<Path>,
+    pub shortest_paths: Vec<Path>,
     potential_shortest_paths: BTreeMap<u64, HashSet<Path>>,
 }
 
-impl<'g> KShortestPathGraphWrapper<'g> {
+impl ProximityGraph {
     pub fn shortest_path(&self, from: usize, to: usize) -> Option<Path> {
         let mut dijkstra = DijkstraState {
-            unvisited: (0..self.graph.query.nodes.len()).collect(),
-            distances: vec![u64::MAX; self.graph.query.nodes.len()],
+            unvisited: (0..self.query.nodes.len()).collect(),
+            distances: vec![u64::MAX; self.query.nodes.len()],
             edges: vec![
                 PathEdgeId { from: usize::MAX, to: usize::MAX, cost: u8::MAX };
-                self.graph.query.nodes.len()
+                self.query.nodes.len()
             ],
-            paths: vec![None; self.graph.query.nodes.len()],
+            paths: vec![None; self.query.nodes.len()],
         };
         dijkstra.distances[from] = 0;
 
@@ -94,7 +88,7 @@ impl<'g> KShortestPathGraphWrapper<'g> {
             }
 
             let succ_cur_node =
-                &self.graph.proximity_edges[cur_node].keys().copied().collect::<HashSet<_>>();
+                &self.proximity_edges[cur_node].keys().copied().collect::<HashSet<_>>();
             // TODO: this intersection may be slow but shouldn't be,
             // can use a bitmap intersection instead
             let unvisited_succ_cur_node = succ_cur_node.intersection(&dijkstra.unvisited);
@@ -140,6 +134,7 @@ impl<'g> KShortestPathGraphWrapper<'g> {
         Some(KShortestPathsState { to, shortest_paths, potential_shortest_paths })
     }
 
+    // TODO: use the cache to potentially remove edges that return an empty RoaringBitmap
     pub fn compute_next_shortest_paths(&mut self, state: &mut KShortestPathsState) -> bool {
         let cur_shortest_path = &state.shortest_paths.last().unwrap();
 
@@ -166,7 +161,7 @@ impl<'g> KShortestPathGraphWrapper<'g> {
                 if root_path == &prev_short_path.edges[..i] {
                     // remove every edge from i to i+1 in the graph
                     let edge_id_to_remove = &prev_short_path.edges[i];
-                    self.removed_edges.insert(*edge_id_to_remove);
+                    self.tmp_removed_edges.insert(*edge_id_to_remove);
                 }
             }
 
@@ -174,8 +169,7 @@ impl<'g> KShortestPathGraphWrapper<'g> {
             // we will combine it with the root path to get a potential kth shortest path
 
             let spur_path = self.shortest_path(*spur_node, state.to);
-
-            self.removed_edges.clear();
+            self.tmp_removed_edges.clear();
 
             let Some(spur_path) = spur_path else { continue; };
             let total_cost = root_cost + spur_path.cost;
@@ -204,95 +198,94 @@ impl<'g> KShortestPathGraphWrapper<'g> {
     }
 }
 
+pub fn graphviz_path(graph: &ProximityGraph, path: &Path) -> String {
+    let mut desc = String::new();
+    desc.push_str("digraph G {\nrankdir = LR;\nnode [shape = \"record\"]\n");
+
+    for node in 0..graph.query.nodes.len() {
+        if matches!(graph.query.nodes[node], QueryNode::Deleted) {
+            continue;
+        }
+        desc.push_str(&format!("{node} [label = {:?}]", &graph.query.nodes[node]));
+        if node == graph.query.root_node {
+            desc.push_str("[color = blue]");
+        } else if node == graph.query.end_node {
+            desc.push_str("[color = red]");
+        }
+        desc.push_str(";\n");
+
+        for (destination, proximities) in graph.proximity_edges[node].iter() {
+            match proximities {
+                ProximityEdges::Unconditional { cost } => {
+                    let edge_id = PathEdgeId { from: node, to: *destination, cost: *cost };
+                    if graph.is_removed_edge(edge_id) {
+                        continue;
+                    }
+                    let color = if path.edges.contains(&edge_id) {
+                        ", color = red".to_owned()
+                    } else {
+                        String::new()
+                    };
+                    desc.push_str(&format!(
+                        "{node} -> {destination} [label = \"always cost {cost}\"{color}];\n"
+                    ));
+                }
+                ProximityEdges::Pairs { pairs, leftover_cost_penalty: leftover_cost } => {
+                    for (pair_idx, pairs) in pairs.iter().enumerate() {
+                        let cost = pair_idx as u8;
+                        if !pairs.is_empty() {
+                            let edge_id = PathEdgeId { from: node, to: *destination, cost };
+                            if graph.is_removed_edge(edge_id) {
+                                continue;
+                            }
+                            let color = if path.edges.contains(&edge_id) {
+                                ", color = red".to_owned()
+                            } else {
+                                String::new()
+                            };
+                            desc.push_str(&format!(
+                                "{node} -> {destination} [label = \"cost {cost}, {} pairs\"{color}];\n",
+                                pairs.len()
+                            ));
+                        }
+                    }
+                    let edge_id =
+                        PathEdgeId { from: node, to: *destination, cost: 8 + leftover_cost };
+                    let color = if path.edges.contains(&edge_id) {
+                        ", color = red".to_owned()
+                    } else {
+                        String::new()
+                    };
+                    desc.push_str(&format!(
+                        "{node} -> {destination} [label = \"remaining cost {}\"{color}];\n",
+                        leftover_cost + 8
+                    ));
+                }
+            }
+        }
+        // for edge in self.edges[node].incoming.iter() {
+        //     desc.push_str(&format!("{node} -> {edge} [color = grey];\n"));
+        // }
+    }
+
+    desc.push('}');
+    desc
+}
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     use charabia::Tokenize;
 
-    use crate::{
-        db_snap,
-        index::tests::TempIndex,
-        search::new::{
-            proximity_graph::{
-                ProximityEdges, ProximityGraph, ProximityGraphCache, WordPairProximityCache,
-                WordPrefixPairProximityCache,
-            },
-            query_term::{word_derivations_max_typo_1, LocatedQueryTerm},
-            shortest_paths::{KShortestPathGraphWrapper, Path},
-            QueryGraph, QueryNode,
-        },
+    use crate::db_snap;
+    use crate::index::tests::TempIndex;
+    use crate::search::new::proximity::proximity_graph::{
+        ProximityEdgeCache, ProximityGraph, ProximityGraphCache, WordPairProximityCache,
+        WordPrefixPairProximityCache,
     };
-
-    use super::PathEdgeId;
-
-    fn graphviz_path(graph: &ProximityGraph, path: &Path) -> String {
-        let mut desc = String::new();
-        desc.push_str("digraph G {\nrankdir = LR;\nnode [shape = \"record\"]\n");
-
-        for node in 0..graph.query.nodes.len() {
-            if matches!(graph.query.nodes[node], QueryNode::Deleted) {
-                continue;
-            }
-            desc.push_str(&format!("{node} [label = {:?}]", &graph.query.nodes[node]));
-            if node == graph.query.root_node {
-                desc.push_str("[color = blue]");
-            } else if node == graph.query.end_node {
-                desc.push_str("[color = red]");
-            }
-            desc.push_str(";\n");
-
-            for (destination, proximities) in graph.proximity_edges[node].iter() {
-                match proximities {
-                    ProximityEdges::Unconditional { cost } => {
-                        let edge_id = PathEdgeId { from: node, to: *destination, cost: *cost };
-                        let color = if path.edges.contains(&edge_id) {
-                            ", color = red".to_owned()
-                        } else {
-                            String::new()
-                        };
-                        desc.push_str(&format!(
-                            "{node} -> {destination} [label = \"always cost {cost}\"{color}];\n"
-                        ));
-                    }
-                    ProximityEdges::Pairs { pairs, leftover_cost_penalty: leftover_cost } => {
-                        for (pair_idx, pairs) in pairs.iter().enumerate() {
-                            let cost = pair_idx as u8;
-                            if !pairs.is_empty() {
-                                let edge_id = PathEdgeId { from: node, to: *destination, cost };
-                                let color = if path.edges.contains(&edge_id) {
-                                    ", color = red".to_owned()
-                                } else {
-                                    String::new()
-                                };
-                                desc.push_str(&format!(
-                                    "{node} -> {destination} [label = \"cost {cost}, {} pairs\"{color}];\n",
-                                    pairs.len()
-                                ));
-                            }
-                        }
-                        let edge_id =
-                            PathEdgeId { from: node, to: *destination, cost: 8 + leftover_cost };
-                        let color = if path.edges.contains(&edge_id) {
-                            ", color = red".to_owned()
-                        } else {
-                            String::new()
-                        };
-                        desc.push_str(&format!(
-                            "{node} -> {destination} [label = \"remaining cost {}\"{color}];\n",
-                            leftover_cost + 8
-                        ));
-                    }
-                }
-            }
-            // for edge in self.edges[node].incoming.iter() {
-            //     desc.push_str(&format!("{node} -> {edge} [color = grey];\n"));
-            // }
-        }
-
-        desc.push('}');
-        desc
-    }
+    use crate::search::new::proximity::shortest_paths::graphviz_path;
+    use crate::search::new::query_term::{word_derivations_max_typo_1, LocatedQueryTerm};
+    use crate::search::new::QueryGraph;
 
     #[test]
     fn build_graph() {
@@ -306,21 +299,11 @@ mod tests {
 
         index
             .add_documents(documents!([
-                {
-                    "text": "0 1 2 3 4 5"
-                },
-                {
-                    "text": "0 a 1 b 2 3 4 5"
-                },
-                {
-                    "text": "0 a 1 b 3 a 4 b 5"
-                },
-                {
-                    "text": "0 a a 1 b 2 3 4 5"
-                },
-                {
-                    "text": "0 a a a a 1 b 3 45"
-                },
+                { "text": "0 1 2 3 4 5" },
+                { "text": "0 a 1 b 2 3 4 5" },
+                { "text": "0 a 1 b 3 a 4 b 5" },
+                { "text": "0 a a 1 b 2 3 4 5" },
+                { "text": "0 a a a a 1 b 3 45" },
             ]))
             .unwrap();
 
@@ -335,43 +318,58 @@ mod tests {
             .unwrap();
         let graph = QueryGraph::from_query(&index, &txn, query).unwrap();
 
+        let desc = graph.graphviz();
+        println!("QUERY GRAPH:\n{desc}");
+
         let mut word_pair_proximity_cache = WordPairProximityCache { cache: HashMap::default() };
         let mut word_prefix_pair_proximity_cache =
             WordPrefixPairProximityCache { cache: HashMap::default() };
+        let mut edge_cache = ProximityEdgeCache { cache: HashMap::default() };
+
         let mut cache = ProximityGraphCache {
-            word_pair_proximity: &mut word_pair_proximity_cache,
-            word_prefix_pair_proximity: &mut word_prefix_pair_proximity_cache,
+            word_pair_proximity_docids: &mut word_pair_proximity_cache,
+            word_prefix_pair_proximity_docids: &mut word_prefix_pair_proximity_cache,
+            edge_docids: &mut edge_cache,
+            empty_path_prefixes: <_>::default(),
         };
 
-        let prox_graph = ProximityGraph::from_query_graph(&index, &txn, graph, &mut cache).unwrap();
+        let mut prox_graph =
+            ProximityGraph::from_query_graph(&index, &txn, graph, &mut cache).unwrap();
 
-        println!("{}", prox_graph.graphviz());
-
-        let mut prox_graph_dijkstra =
-            KShortestPathGraphWrapper { graph: &prox_graph, removed_edges: HashSet::new() };
-
-        let mut state = prox_graph_dijkstra
-            .initialize_shortest_paths_state(
-                prox_graph_dijkstra.graph.query.root_node,
-                prox_graph_dijkstra.graph.query.end_node,
-            )
+        let mut state = prox_graph
+            .initialize_shortest_paths_state(prox_graph.query.root_node, prox_graph.query.end_node)
             .unwrap();
-        while state.shortest_paths.last().unwrap().cost <= 8 {
-            if !prox_graph_dijkstra.compute_next_shortest_paths(&mut state) {
+
+        let mut universe = index.documents_ids(&txn).unwrap();
+
+        for cost in 7..=7 {
+            let mut is_last_bucket = false;
+            while state.shortest_paths.last().unwrap().cost <= cost {
+                if !prox_graph.compute_next_shortest_paths(&mut state) {
+                    is_last_bucket = true;
+                    break;
+                }
+            }
+            let mut paths = vec![];
+            for path in state.shortest_paths.iter() {
+                if path.cost == cost {
+                    let cost = path.cost;
+                    let s = graphviz_path(&prox_graph, path);
+                    println!("COST: {cost}\n{s}\n\n==========\n");
+                    paths.push(path.clone());
+                }
+            }
+            println!("{}", paths.len());
+            let docids =
+                prox_graph.resolve_paths(&index, &txn, &mut cache, &universe, &paths).unwrap();
+            universe -= &docids;
+            println!("cost {cost}: {docids:?}");
+            println!("new universe: {universe:?}");
+            println!("prox graph: {}", prox_graph.graphviz());
+            if is_last_bucket {
                 break;
             }
-
-            // println!("\n===========\n{}===========\n", prox_graph.graphviz());
         }
-        drop(prox_graph_dijkstra);
-        for path in state.shortest_paths {
-            let cost = path.cost;
-            let s = graphviz_path(&prox_graph, &path);
-            println!("COST: {cost}\n{s}\n\n==========\n");
-
-            // println!("nodes: {nodes:?}");
-        }
-        // println!("{k_paths:?}");
     }
 }
 /*

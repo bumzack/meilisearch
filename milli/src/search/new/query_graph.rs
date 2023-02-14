@@ -1,7 +1,10 @@
+use std::collections::HashSet;
+use std::fmt::Debug;
+
+use heed::RoTxn;
+
 use super::query_term::{LocatedQueryTerm, QueryTerm, WordDerivations};
 use crate::{Index, Result};
-use heed::RoTxn;
-use std::{collections::HashSet, fmt::Debug};
 
 #[derive(Clone)]
 pub enum QueryNode {
@@ -17,7 +20,7 @@ pub struct Edges {
     pub outgoing: HashSet<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QueryGraph {
     pub root_node: usize,
     pub end_node: usize,
@@ -280,9 +283,11 @@ TODO:
 */
 #[cfg(test)]
 mod tests {
-    use super::{LocatedQueryTerm, QueryGraph, QueryNode};
-    use crate::{index::tests::TempIndex, search::new::query_term::word_derivations_max_typo_1};
     use charabia::Tokenize;
+
+    use super::{LocatedQueryTerm, QueryGraph, QueryNode};
+    use crate::index::tests::TempIndex;
+    use crate::search::new::query_term::word_derivations_max_typo_1;
 
     impl QueryGraph {
         pub fn graphviz(&self) -> String {
@@ -344,7 +349,7 @@ node [shape = "record"]
             |word, is_prefix| word_derivations_max_typo_1(&index, &txn, word, is_prefix, &fst),
         )
         .unwrap();
-        let mut graph = QueryGraph::from_query(&index, &txn, query).unwrap();
+        let graph = QueryGraph::from_query(&index, &txn, query).unwrap();
         println!("{}", graph.graphviz());
 
         // let positions_to_remove = vec![3, 6, 0, 4];

@@ -1,17 +1,19 @@
 // TODO: put primitive query part in here
 
-use crate::{
-    search::{
-        build_dfa,
-        fst_utils::{Intersection, StartsWith},
-        get_first,
-    },
-    Index, Result,
-};
-use charabia::{normalizer::NormalizedTokenIter, SeparatorKind, TokenKind};
-use fst::{automaton::Str, IntoStreamer, Streamer};
-use heed::{types::DecodeIgnore, RoTxn};
-use std::{borrow::Cow, mem, ops::RangeInclusive};
+use std::borrow::Cow;
+use std::mem;
+use std::ops::RangeInclusive;
+
+use charabia::normalizer::NormalizedTokenIter;
+use charabia::{SeparatorKind, TokenKind};
+use fst::automaton::Str;
+use fst::{IntoStreamer, Streamer};
+use heed::types::DecodeIgnore;
+use heed::RoTxn;
+
+use crate::search::fst_utils::{Intersection, StartsWith};
+use crate::search::{build_dfa, get_first};
+use crate::{Index, Result};
 
 #[derive(Debug, Clone)]
 pub struct WordDerivations {

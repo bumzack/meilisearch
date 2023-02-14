@@ -1,120 +1,109 @@
-// use roaring::RoaringBitmap;
+use heed::RoTxn;
+use roaring::RoaringBitmap;
 
-// use crate::{
-//     search::{criteria::resolve_query_tree, query_tree::Operation, WordDerivationsCache},
-//     Index, Result,
-// };
+use super::resolve_query_graph::resolve_query_graph;
+use super::{QueryGraphOrPlaceholder, RankingRule, RankingRuleOutput};
+use crate::{Index, Result};
 
-// use super::{QueryTreeOrPlaceholder, RankingRule, RankingRuleOutput};
+pub struct Words {
+    universe: RoaringBitmap,
+    query_graph: QueryGraphOrPlaceholder,
+    exhausted: bool,
+}
+impl Default for Words {
+    fn default() -> Self {
+        Self {
+            universe: RoaringBitmap::default(),
+            query_graph: QueryGraphOrPlaceholder::Placeholder,
+            exhausted: true,
+        }
+    }
+}
 
-// enum WordsIter {
-//     Branches { branches: std::vec::IntoIter<Operation> },
-//     Placeholder { candidates: Option<RoaringBitmap> },
-// }
-// pub struct Words<'ctx, 'search> {
-//     index: &'ctx Index,
-//     #[allow(unused)]
-//     universe: &'search RoaringBitmap,
+impl<'transaction> RankingRule<'transaction> for Words {
+    fn init_bucket_iter(
+        &mut self,
+        _index: &Index,
+        _txn: &'transaction RoTxn,
+        parent_candidates: &RoaringBitmap,
+        parent_query_graph: &QueryGraphOrPlaceholder,
+    ) -> Result<()> {
+        self.universe = parent_candidates.clone();
+        self.query_graph = parent_query_graph.clone();
+        self.exhausted = false;
+        Ok(())
+    }
 
-//     iter: Option<WordsIter>,
-// }
-// impl<'index, 'search> Words<'index, 'search> {
-//     pub fn new(index: &'index Index, universe: &'search RoaringBitmap) -> Self {
-//         Self { index, universe, iter: None }
-//     }
-// }
-// impl<'index: 'search, 'search> RankingRule for Words<'index, 'search> {
-//     fn init_bucket_iter(
-//         &mut self,
-//         parent_candidates: &RoaringBitmap,
-//         parent_query_tree: &QueryTreeOrPlaceholder,
-//         _wdcache: &mut WordDerivationsCache,
-//     ) -> Result<()> {
-//         match parent_query_tree {
-//             QueryTreeOrPlaceholder::QueryTree(qt) => {
-//                 let branches = split_query_tree(qt.clone());
-//                 self.iter = Some(WordsIter::Branches { branches: branches.into_iter() });
-//             }
-//             QueryTreeOrPlaceholder::Placeholder => {
-//                 self.iter =
-//                     Some(WordsIter::Placeholder { candidates: Some(parent_candidates.clone()) });
-//             }
-//         };
-//         Ok(())
-//     }
+    fn next_bucket(
+        &mut self,
+        index: &Index,
+        txn: &'transaction RoTxn,
+    ) -> Result<Option<RankingRuleOutput>> {
+        if self.exhausted {
+            return Ok(None);
+        }
+        match self.query_graph.clone() {
+            QueryGraphOrPlaceholder::QueryGraph(q) => {
+                let next_bucket = resolve_query_graph(index, txn, &q, self.universe.clone())?;
+                let cur_bucket = std::mem::replace(&mut self.universe, next_bucket);
+                // TODO: find the nodes to remove and call q.remove_nodes(nodes);
+                // pass the old `q` to the child ranking rule through the RankingRuleOutput
+                // set the current query graph to `q`
+                self.exhausted = true;
+                Ok(Some(RankingRuleOutput {
+                    query_graph: QueryGraphOrPlaceholder::QueryGraph(q),
+                    candidates: cur_bucket,
+                }))
+            }
+            QueryGraphOrPlaceholder::Placeholder => {
+                self.exhausted = true;
+                Ok(Some(RankingRuleOutput {
+                    query_graph: QueryGraphOrPlaceholder::Placeholder,
+                    candidates: std::mem::take(&mut self.universe),
+                }))
+            }
+        }
+    }
 
-//     fn next_bucket(
-//         &mut self,
-//         wdcache: &mut WordDerivationsCache,
-//     ) -> Result<Option<RankingRuleOutput>> {
-//         let iter = self.iter.as_mut().unwrap();
-//         match iter {
-//             WordsIter::Branches { branches } => {
-//                 let Some(branch) = branches.next() else { return Ok(None) };
-//                 let qt_candidates = resolve_query_tree(self.index, &branch, wdcache)?;
-//                 Ok(Some(RankingRuleOutput {
-//                     query_tree: QueryTreeOrPlaceholder::QueryTree(branch),
-//                     candidates: qt_candidates,
-//                 }))
-//             }
-//             WordsIter::Placeholder { candidates } => {
-//                 let Some(candidates) = candidates.take() else { return Ok(None) };
-//                 Ok(Some(RankingRuleOutput {
-//                     query_tree: QueryTreeOrPlaceholder::Placeholder,
-//                     candidates,
-//                 }))
-//             }
-//         }
-//     }
+    fn reset_bucket_iter(&mut self, _index: &Index, _txn: &'transaction RoTxn) {
+        self.exhausted = true;
+    }
+}
 
-//     fn reset_bucket_iter(&mut self) {
-//         self.iter = None;
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    // use charabia::Tokenize;
+    // use roaring::RoaringBitmap;
 
-// fn split_query_tree(query_tree: Operation) -> Vec<Operation> {
-//     match query_tree {
-//         Operation::Or(true, ops) => ops,
-//         otherwise => vec![otherwise],
-//     }
-// }
+    // use crate::{
+    //     index::tests::TempIndex,
+    //     search::{criteria::CriteriaBuilder, new::QueryGraphOrPlaceholder},
+    // };
 
-// #[cfg(test)]
-// mod tests {
-//     use charabia::Tokenize;
-//     use roaring::RoaringBitmap;
+    // use super::Words;
 
-//     use crate::{
-//         index::tests::TempIndex,
-//         search::{
-//             criteria::CriteriaBuilder, new::QueryTreeOrPlaceholder, query_tree::QueryTreeBuilder,
-//         },
-//     };
+    // fn placeholder() {
+    //     let qt = QueryGraphOrPlaceholder::Placeholder;
+    //     let index = TempIndex::new();
+    //     let rtxn = index.read_txn().unwrap();
 
-//     use super::Words;
+    //     let query = "a beautiful summer house by the beach overlooking what seems";
+    //     // let mut builder = QueryTreeBuilder::new(&rtxn, &index).unwrap();
+    //     // let (qt, parts, matching_words) = builder.build(query.tokenize()).unwrap().unwrap();
 
-//     fn placeholder() {
-//         let qt = QueryTreeOrPlaceholder::Placeholder;
-//         let index = TempIndex::new();
-//         let rtxn = index.read_txn().unwrap();
+    //     // let cb = CriteriaBuilder::new(&rtxn, &index).unwrap();
+    //     // let x = cb
+    //     //     .build(
+    //     //         Some(qt),
+    //     //         Some(parts),
+    //     //         None,
+    //     //         None,
+    //     //         false,
+    //     //         None,
+    //     //         crate::CriterionImplementationStrategy::OnlySetBased,
+    //     //     )
+    //     //     .unwrap();
 
-//         let query = "a beautiful summer house by the beach overlooking what seems";
-//         let mut builder = QueryTreeBuilder::new(&rtxn, &index).unwrap();
-//         let (qt, parts, matching_words) = builder.build(query.tokenize()).unwrap().unwrap();
-
-//         let cb = CriteriaBuilder::new(&rtxn, &index).unwrap();
-//         let x = cb
-//             .build(
-//                 Some(qt),
-//                 Some(parts),
-//                 None,
-//                 None,
-//                 false,
-//                 None,
-//                 crate::CriterionImplementationStrategy::OnlySetBased,
-//             )
-//             .unwrap();
-
-//         let rr = Words::new(&index, &RoaringBitmap::from_sorted_iter(0..1000)).unwrap();
-//     }
-// }
+    //     // let rr = Words::new(&index, &RoaringBitmap::from_sorted_iter(0..1000)).unwrap();
+    // }
+}

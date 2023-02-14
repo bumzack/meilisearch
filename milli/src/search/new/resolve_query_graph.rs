@@ -1,11 +1,13 @@
-use super::query_term::{QueryTerm, WordDerivations};
-use super::QueryGraph;
-use crate::{Index, Result, RoaringBitmapCodec};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet, VecDeque};
+
 use heed::types::ByteSlice;
 use heed::{BytesDecode, RoTxn};
 use roaring::{MultiOps, RoaringBitmap};
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet, VecDeque};
+
+use super::query_term::{QueryTerm, WordDerivations};
+use super::QueryGraph;
+use crate::{Index, Result, RoaringBitmapCodec};
 
 // TODO: manual performance metrics: access to DB, bitmap deserializations/operations, etc.
 
@@ -74,6 +76,9 @@ pub fn resolve_query_graph(
     q: &QueryGraph,
     universe: RoaringBitmap,
 ) -> Result<RoaringBitmap> {
+    // TODO: there is definitely a faster way to compute this big
+    // roaring bitmap expression
+
     // TODO: these variables should be given as arguments
     // Maybe as a broader IndexCache?
     let mut word_docids = Default::default();
@@ -135,6 +140,8 @@ pub fn resolve_query_graph(
                             .map(|slice| RoaringBitmapCodec::bytes_decode(slice).unwrap());
                         let derivations_docids = MultiOps::union(derivations_iter);
                         // TODO: if `or` is empty, register that somewhere, and immediately return an empty bitmap
+                        // On the other hand, `or` *cannot* be empty, only its intersection with the universe can
+                        //
                         // TODO: Or we don't do anything and accumulate all these operations in a tree of operations
                         // between frozen roaring bitmap that is resolved only at the very end
                         predecessors_docids & derivations_docids
@@ -171,17 +178,13 @@ pub fn resolve_query_graph(
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        db_snap,
-        index::tests::TempIndex,
-        search::new::{
-            query_term::{word_derivations_max_typo_1, LocatedQueryTerm},
-            QueryGraph,
-        },
-    };
     use charabia::Tokenize;
 
     use super::resolve_query_graph;
+    use crate::db_snap;
+    use crate::index::tests::TempIndex;
+    use crate::search::new::query_term::{word_derivations_max_typo_1, LocatedQueryTerm};
+    use crate::search::new::QueryGraph;
 
     #[test]
     fn test_resolve_query_graph() {
@@ -221,7 +224,7 @@ mod tests {
             |word, is_prefix| word_derivations_max_typo_1(&index, &txn, word, is_prefix, &fst),
         )
         .unwrap();
-        let mut graph = QueryGraph::from_query(&index, &txn, query).unwrap();
+        let graph = QueryGraph::from_query(&index, &txn, query).unwrap();
         println!("{}", graph.graphviz());
 
         let txn = index.read_txn().unwrap();
